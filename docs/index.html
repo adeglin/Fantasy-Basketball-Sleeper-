@@ -8,46 +8,99 @@
     body {
       font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       margin: 0;
-      padding: 1rem;
-      background: #0b1020;
-      color: #f5f5f5;
+      padding: 0;
+      background: #020617;
+      color: #f9fafb;
     }
-    h1, h2 {
-      margin: 0.5rem 0;
+    header {
+      padding: 1rem 1.5rem;
+      background: #0f172a;
+      border-bottom: 1px solid #1f2937;
+      position: sticky;
+      top: 0;
+      z-index: 10;
     }
-    .section {
-      margin: 1.5rem 0;
+    h1 {
+      margin: 0;
+      font-size: 1.4rem;
+    }
+    #meta {
+      font-size: 0.8rem;
+      opacity: 0.75;
+      margin-top: 0.25rem;
+    }
+    .tabs {
+      display: flex;
+      gap: 0.5rem;
+      margin-top: 0.75rem;
+      flex-wrap: wrap;
+    }
+    .tab-button {
+      border: none;
+      border-radius: 999px;
+      padding: 0.35rem 0.8rem;
+      font-size: 0.85rem;
+      cursor: pointer;
+      background: #111827;
+      color: #e5e7eb;
+    }
+    .tab-button.active {
+      background: #2563eb;
+      color: white;
+    }
+    main {
+      padding: 1rem 1.5rem 2rem;
+    }
+    .tab-content {
+      display: none;
+      margin-top: 1rem;
+    }
+    .tab-content.active {
+      display: block;
+    }
+    .card {
+      margin: 0.75rem 0;
       padding: 1rem;
-      background: #151a2c;
+      background: #020617;
       border-radius: 12px;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+      box-shadow: 0 8px 20px rgba(0,0,0,0.55);
+      border: 1px solid #1e293b;
+    }
+    .card h2 {
+      margin: 0 0 0.5rem 0;
+      font-size: 1rem;
     }
     table {
       width: 100%;
       border-collapse: collapse;
-      margin-top: 0.75rem;
-      font-size: 0.9rem;
+      margin-top: 0.5rem;
+      font-size: 0.85rem;
     }
     th, td {
       padding: 0.35rem 0.5rem;
-      border-bottom: 1px solid rgba(255,255,255,0.06);
+      border-bottom: 1px solid rgba(148,163,184,0.3);
       text-align: left;
+      vertical-align: top;
     }
     th {
-      background: rgba(255,255,255,0.03);
+      background: rgba(15,23,42,0.9);
       position: sticky;
       top: 0;
+      z-index: 1;
     }
     .scroll-table {
-      max-height: 400px;
+      max-height: 420px;
       overflow-y: auto;
+      border-radius: 8px;
+      border: 1px solid #1f2937;
     }
     .pill {
       display: inline-block;
-      padding: 0.15rem 0.4rem;
+      padding: 0.1rem 0.4rem;
       border-radius: 999px;
       font-size: 0.7rem;
-      background: #1f263b;
+      background: #1f2937;
+      color: #e5e7eb;
     }
     .pill-rostered {
       background: #2563eb;
@@ -61,29 +114,155 @@
       background: #b91c1c;
       color: #fee2e2;
     }
+    .pill-pos {
+      background: #0369a1;
+    }
+    .pill-owner {
+      background: #6b21a8;
+    }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-top: 0.5rem;
+      margin-bottom: 0.5rem;
+      font-size: 0.8rem;
+    }
+    .controls label {
+      display: flex;
+      align-items: center;
+      gap: 0.25rem;
+    }
+    .controls input,
+    .controls select {
+      background: #020617;
+      color: #e5e7eb;
+      border-radius: 8px;
+      border: 1px solid #1f2937;
+      padding: 0.25rem 0.4rem;
+      font-size: 0.8rem;
+    }
+    .highlight-recent {
+      background: rgba(37,99,235,0.15);
+    }
   </style>
 </head>
 <body>
-  <h1>NBA Fantasy Data Viewer</h1>
-  <p id="meta"></p>
+  <header>
+    <h1>NBA Fantasy Data Viewer</h1>
+    <div id="meta">Loading...</div>
+    <div class="tabs">
+      <button class="tab-button active" data-tab="overview">Overview</button>
+      <button class="tab-button" data-tab="rosters">Rosters</button>
+      <button class="tab-button" data-tab="free-agents">Free Agents</button>
+      <button class="tab-button" data-tab="gamelogs">Game Logs</button>
+      <button class="tab-button" data-tab="transactions">Transactions</button>
+      <button class="tab-button" data-tab="injuries">Injuries</button>
+    </div>
+  </header>
 
-  <div class="section">
-    <h2>Current Season Players (Top 100 by PTS)</h2>
-    <div id="players-table" class="scroll-table"></div>
-  </div>
+  <main>
+    <!-- OVERVIEW TAB -->
+    <section id="tab-overview" class="tab-content active">
+      <div class="card">
+        <h2>Top Players (Current Season, by PTS)</h2>
+        <p style="font-size:0.8rem;opacity:0.8;">
+          Snapshot of the current season leaders by points per game. This is a quick overview;
+          deeper analysis will live in other tabs later.
+        </p>
+        <div class="scroll-table" id="overview-players-table"></div>
+      </div>
+    </section>
 
-  <div class="section">
-    <h2>Your Sleeper Rosters</h2>
-    <div id="rosters-table" class="scroll-table"></div>
-  </div>
+    <!-- ROSTERS TAB -->
+    <section id="tab-rosters" class="tab-content">
+      <div class="card">
+        <h2>Full Rosters (by Owner)</h2>
+        <div class="controls">
+          <label>
+            Filter owner:
+            <input type="text" id="rosters-owner-filter" placeholder="e.g. mjgrana" />
+          </label>
+          <label>
+            Filter player:
+            <input type="text" id="rosters-player-filter" placeholder="e.g. Luka" />
+          </label>
+        </div>
+        <div class="scroll-table" id="rosters-table"></div>
+      </div>
+    </section>
 
-  <div class="section">
-    <h2>Live Injuries (ESPN)</h2>
-    <p style="font-size:0.85rem;opacity:0.8;">
-      Fetched live when you open the page. If this section is empty, ESPN may be blocking cross-origin requests.
-    </p>
-    <div id="injuries-table" class="scroll-table"></div>
-  </div>
+    <!-- FREE AGENTS TAB -->
+    <section id="tab-free-agents" class="tab-content">
+      <div class="card">
+        <h2>Free Agents (Sleeper Player Pool)</h2>
+        <p style="font-size:0.8rem;opacity:0.8;">
+          Players in the Sleeper NBA pool not currently on any roster in this league.
+        </p>
+        <div class="controls">
+          <label>
+            Filter player:
+            <input type="text" id="fa-player-filter" placeholder="e.g. Smith" />
+          </label>
+          <label>
+            Position:
+            <select id="fa-pos-filter">
+              <option value="">All</option>
+              <option value="PG">PG</option>
+              <option value="SG">SG</option>
+              <option value="SF">SF</option>
+              <option value="PF">PF</option>
+              <option value="C">C</option>
+            </select>
+          </label>
+        </div>
+        <div class="scroll-table" id="fa-table"></div>
+      </div>
+    </section>
+
+    <!-- GAME LOGS TAB -->
+    <section id="tab-gamelogs" class="tab-content">
+      <div class="card">
+        <h2>Game Logs & Historical Box Scores</h2>
+        <p style="font-size:0.8rem;opacity:0.8;">
+          All NBA game logs for the seasons pulled. Most recent games are highlighted.
+        </p>
+        <div class="controls">
+          <label>
+            Season:
+            <select id="gamelogs-season-select"></select>
+          </label>
+          <label>
+            Player filter:
+            <input type="text" id="gamelogs-player-filter" placeholder="e.g. Doncic" />
+          </label>
+        </div>
+        <div class="scroll-table" id="gamelogs-table"></div>
+      </div>
+    </section>
+
+    <!-- TRANSACTIONS TAB -->
+    <section id="tab-transactions" class="tab-content">
+      <div class="card">
+        <h2>League Transactions</h2>
+        <p style="font-size:0.8rem;opacity:0.8;">
+          Raw Sleeper transactions for the league, grouped by week. Player names are resolved where possible.
+        </p>
+        <div class="scroll-table" id="transactions-table"></div>
+      </div>
+    </section>
+
+    <!-- INJURIES TAB -->
+    <section id="tab-injuries" class="tab-content">
+      <div class="card">
+        <h2>Live Injuries (ESPN)</h2>
+        <p style="font-size:0.8rem;opacity:0.8;">
+          Fetched live when you open the page. If this section is empty, ESPN may be blocking cross-origin requests.
+        </p>
+        <div class="scroll-table" id="injuries-table"></div>
+      </div>
+    </section>
+  </main>
 
   <script src="app.js"></script>
 </body>
