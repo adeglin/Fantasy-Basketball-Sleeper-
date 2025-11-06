@@ -1,4 +1,3 @@
-import os
 import time
 import json
 import unicodedata
@@ -32,7 +31,7 @@ def season_gamelogs_path(season: str) -> Path:
 
 
 def safe_get(url, desc, timeout=10):
-    print(f"[HTTP] {desc} ...")
+    print(f"[HTTP] {desc} ... {url}")
     try:
         resp = requests.get(url, timeout=timeout)
         resp.raise_for_status()
@@ -52,7 +51,37 @@ def norm_name(s):
 
 
 # -----------------------------
-# Sleeper data
+# Sleeper players metadata
+# -----------------------------
+def fetch_sleeper_players():
+    url = "https://api.sleeper.app/v1/players/nba"
+    data = safe_get(url, "Sleeper NBA players", timeout=25)
+    if not data:
+        return []
+
+    records = []
+    for pid, p in data.items():
+        records.append({
+            "sleeper_player_id": pid,
+            "full_name": p.get("full_name"),
+            "first_name": p.get("first_name"),
+            "last_name": p.get("last_name"),
+            "position": p.get("position"),
+            "team": p.get("team"),
+            "fantasy_positions": p.get("fantasy_positions"),
+            "status": p.get("status"),
+            "injury_status": p.get("injury_status"),
+            "injury_notes": p.get("injury_notes"),
+            "age": p.get("age"),
+            "years_exp": p.get("years_exp"),
+            "active": p.get("active"),
+        })
+    print(f"[Sleeper] Players metadata rows: {len(records)}")
+    return records
+
+
+# -----------------------------
+# Sleeper league / rosters / transactions
 # -----------------------------
 def fetch_sleeper_block():
     base_league_url = f"https://api.sleeper.app/v1/league/{LEAGUE_ID}"
@@ -75,7 +104,7 @@ def fetch_sleeper_block():
             how="left",
         )
 
-    # Exploded rosters to player-level (useful later)
+    # Exploded rosters to player-level (each row = one player on one roster)
     rosters_exploded = pd.DataFrame()
     if not rosters_df.empty:
         rosters_exploded = rosters_df.explode("players", ignore_index=True)
@@ -98,12 +127,16 @@ def fetch_sleeper_block():
 
     transactions_df = pd.DataFrame(transactions_all) if transactions_all else pd.DataFrame()
 
+    # Sleeper players metadata
+    players_list = fetch_sleeper_players()
+
     sleeper_block = {
         "league": league,
         "users": users_df.to_dict(orient="records"),
         "rosters": rosters_df.to_dict(orient="records"),
         "rosters_players": rosters_exploded.to_dict(orient="records"),
         "transactions": transactions_df.to_dict(orient="records"),
+        "players": players_list,
     }
     return sleeper_block
 
@@ -125,12 +158,10 @@ def fetch_or_load_nba_season_stats(season: str) -> pd.DataFrame:
         timeout=60,
     )
     df = stats.get_data_frames()[0]
-    # Only keep players who have played (MIN > 0)
     df["MIN"] = pd.to_numeric(df["MIN"], errors="coerce").fillna(0)
     df = df[df["MIN"] > 0].copy()
 
     if season in HISTORICAL_SEASONS:
-        # Cache historical seasons to avoid re-fetching
         df.to_json(path, orient="records")
         print(f"[CACHE] Saved NBA season stats {season} -> {path}")
 
@@ -209,7 +240,6 @@ def main():
 
     # 2) NBA seasons (historical + current)
     nba_seasons = {}
-
     for season in HISTORICAL_SEASONS + [CURRENT_SEASON]:
         try:
             season_stats_df = fetch_or_load_nba_season_stats(season)
@@ -242,7 +272,6 @@ def main():
 
     out_path = DOCS_DATA_DIR / "data_bundle.json"
     with out_path.open("w", encoding="utf-8") as f:
-        # Minified JSON (no extra whitespace) for smaller file size
         json.dump(bundle, f, ensure_ascii=False, separators=(",", ":"))
 
     print(f"[OK] Wrote data bundle -> {out_path.resolve()}")
