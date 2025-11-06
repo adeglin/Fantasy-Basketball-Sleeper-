@@ -16,7 +16,7 @@ jobs:
         run: |
           python3 tools/update_nba_historical.py
 
-      - name: Commit updated data
+          - name: Commit updated data
         env:
           GH_PAT: ${{ secrets.PERSONAL_TOKEN }}
         run: |
@@ -25,4 +25,5 @@ jobs:
           git remote set-url origin https://x-access-token:${GH_PAT}@github.com/adeglin/Fantasy-Basketball-Sleeper-.git
           git add docs/data/nba_historical.json || echo "No file found to add"
           git commit -m "Automated data update [skip ci]" || echo "No changes"
-          git push origin main
+          git push https://x-access-token:${GH_PAT}@github.com/adeglin/Fantasy-Basketball-Sleeper-.git main
+
