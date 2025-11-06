@@ -18,11 +18,11 @@ jobs:
 
       - name: Commit updated data
         env:
-          GITHUB_TOKEN: ${{ secrets.PERSONAL_TOKEN }}
+          GH_PAT: ${{ secrets.PERSONAL_TOKEN }}
         run: |
-          git config user.name "Auto Data Updater"
-          git config user.email "runner@users.noreply.github.com"
-          git remote set-url origin https://x-access-token:${GITHUB_TOKEN}@github.com/adeglin/Fantasy-Basketball-Sleeper-.git
-          git add docs/data/data_bundle.json
+          git config --global user.name "Auto Data Updater"
+          git config --global user.email "runner@users.noreply.github.com"
+          git remote set-url origin https://x-access-token:${GH_PAT}@github.com/adeglin/Fantasy-Basketball-Sleeper-.git
+          git add docs/data/nba_historical.json || echo "No file found to add"
           git commit -m "Automated data update [skip ci]" || echo "No changes"
           git push origin main
