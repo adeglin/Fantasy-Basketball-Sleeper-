@@ -13,10 +13,13 @@ jobs:
       - name: Update NBA data
         run: |
           python3 tools/update_nba_historical.py
-      - name: Commit updated data
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add docs/data/data_bundle.json
-          git commit -m "Automated data update [skip ci]" || echo "No changes"
-          git push
+     - name: Commit updated data
+  env:
+    GITHUB_TOKEN: ${{ secrets.PERSONAL_TOKEN }}
+  run: |
+    git config user.name "Auto Data Updater"
+    git config user.email "runner@users.noreply.github.com"
+    git remote set-url origin https://x-access-token:${GITHUB_TOKEN}@github.com/adeglin/Fantasy-Basketball-Sleeper-.git
+    git add docs/data/data_bundle.json
+    git commit -m "Automated data update [skip ci]" || echo "No changes"
+    git push origin main
