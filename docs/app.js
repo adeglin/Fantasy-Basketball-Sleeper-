@@ -164,7 +164,7 @@ function renderRostersTable(bundle) {
   doRender();
 }
 
-// ============ FREE AGENTS (ACTIVE 2025–26 PLAYERS, NOT ROSTERED) ============
+// ============ FREE AGENTS (ACTIVE 2025–26 OR FALLBACK) ============
 
 function renderFreeAgentsTable(bundle) {
   const container = document.getElementById("fa-table");
@@ -178,15 +178,12 @@ function renderFreeAgentsTable(bundle) {
 
   const currentSeason = bundle.meta.current_season;
   const seasonBlock = bundle.nba?.seasons?.[currentSeason];
-  if (!seasonBlock || !seasonBlock.season_stats || !seasonBlock.season_stats.length) {
-    container.textContent = "No current season NBA stats available; cannot compute free agents.";
-    return;
-  }
+  const hasSeasonStats =
+    seasonBlock &&
+    Array.isArray(seasonBlock.season_stats) &&
+    seasonBlock.season_stats.length > 0;
 
-  const stats = seasonBlock.season_stats;
-  const statsNameSet = new Set(stats.map((s) => normName(s.PLAYER_NAME)));
-
-  // All sleeper IDs currently on a roster
+  // Which players are already owned in the league
   const owned = new Set();
   for (const r of rostersPlayers) {
     if (r.sleeper_player_id != null) {
@@ -194,20 +191,40 @@ function renderFreeAgentsTable(bundle) {
     }
   }
 
-  // Active 2025–26 NBA players in Sleeper pool who are NOT on a fantasy roster
-  const candidateFA = players.filter((p) => {
-    const id = String(p.sleeper_player_id || "");
-    if (!id || owned.has(id)) return false;
+  let candidateFA;
 
-    // must be an NBA player this season
-    if (!p.team) return false; // no team => ignore
-    if (p.active === false) return false;
+  if (hasSeasonStats) {
+    // Preferred: active 2025–26 NBA players with current-season stats, not rostered
+    const stats = seasonBlock.season_stats;
+    const statsNameSet = new Set(
+      stats.map((s) => normName(s.PLAYER_NAME))
+    );
 
-    const nm = normName(p.full_name);
-    if (!statsNameSet.has(nm)) return false; // not in 2025–26 stats => ignore
+    candidateFA = players.filter((p) => {
+      const id = String(p.sleeper_player_id || "");
+      if (!id || owned.has(id)) return false;
 
-    return true;
-  });
+      if (!p.team) return false;
+      if (p.active === false) return false;
+
+      const nm = normName(p.full_name);
+      if (!statsNameSet.has(nm)) return false;
+
+      return true;
+    });
+  } else {
+    // Fallback: no NBA stats available – use Sleeper only
+    candidateFA = players.filter((p) => {
+      const id = String(p.sleeper_player_id || "");
+      if (!id || owned.has(id)) return false;
+
+      if (!p.team) return false;           // must be on an NBA team
+      if (p.status === "RET") return false;
+      if (p.active === false) return false;
+
+      return true;
+    });
+  }
 
   const filterInput = document.getElementById("fa-player-filter");
   const posSelect = document.getElementById("fa-pos-filter");
@@ -344,7 +361,7 @@ function setupGameLogs(bundle) {
       html += `<td>${esc(g.PTS)}</td>`;
       html += `<td>${esc(g.REB)}</td>`;
       html += `<td>${esc(g.AST)}</td>`;
-      html += "</tr>";
+      html += "</tr>`;
     }
 
     html += "</tbody></table>";
@@ -414,7 +431,7 @@ function renderTransactions(bundle) {
     html += `<td>${esc(formatAddsDrops(t.adds))}</td>`;
     html += `<td>${esc(formatAddsDrops(t.drops))}</td>`;
     html += `<td>${esc(t.waiver_bid ?? "")}</td>`;
-    html += "</tr>";
+    html += "</tr>`;
   }
 
   html += "</tbody></table>";
@@ -491,7 +508,7 @@ async function fetchLiveInjuries() {
       html += `<td>${esc(inj.type)}</td>`;
       html += `<td>${esc(inj.detail)}</td>`;
       html += `<td>${esc(inj.returnDate)}</td>`;
-      html += "</tr>";
+      html += "</tr>`;
     }
 
     html += "</tbody></table>";
