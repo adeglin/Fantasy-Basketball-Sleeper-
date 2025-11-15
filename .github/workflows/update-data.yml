@@ -9,47 +9,55 @@ jobs:
   update:
     runs-on: self-hosted
 
-    # Environment variables available to all steps
     env:
+      # Personal access token with repo:write permissions
       GH_PAT: ${{ secrets.PERSONAL_TOKEN }}
+      # BallDontLie API key for NBA stats
       BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
 
     steps:
-      - name: Check out repository
+      - name: Checkout repository
         uses: actions/checkout@v3
-        with:
-          # IMPORTANT: disable default GITHUB_TOKEN credentials so pushes
-          # use your PAT instead of github-actions[bot]
-          persist-credentials: false
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+      - name: Show current commit
+        run: git log -1 --oneline || echo "No commits yet"
 
-      - name: Install dependencies
+      - name: Install Python dependencies (if any)
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          if [ -f requirements.txt ]; then
+            python3 -m pip install --upgrade pip
+            python3 -m pip install -r requirements.txt
+          else
+            echo "No requirements.txt, skipping pip install"
+          fi
 
-      - name: Update NBA data bundle
+      - name: Run data updater
         run: |
-          python tools/update_nba_historical.py
+          python3 tools/update_nba_historical.py
 
       - name: Show status for debugging
         run: |
+          echo
+          echo "========== GIT STATUS =========="
           git status
+          echo "================================"
+          ls -lh docs/data || true
 
       - name: Commit and push updated data
         run: |
+          set -e
+
           git config user.name "Auto Data Updater"
           git config user.email "runner@users.noreply.github.com"
 
-          # Force origin to use your PAT
+          # Make sure pushes use your PAT and NOT the default github-actions[bot]
           git remote set-url origin https://x-access-token:${GH_PAT}@github.com/adeglin/Fantasy-Basketball-Sleeper-.git
 
-          git add docs/data/nba_historical.json || echo "no file"
-          git commit -m "Automated data update [skip ci]" || echo "no changes"
+          git add docs/data/nba_historical.json || echo "Nothing to add"
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
 
-          # Push using the PAT (NOT github-actions[bot])
-          git push origin main || echo "no changes pushed"
+          git commit -m "Automated data update [skip ci]"
+          git push origin main
