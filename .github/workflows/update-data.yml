@@ -9,7 +9,7 @@ jobs:
   update:
     runs-on: self-hosted
 
-    # Environment variables available to all steps in this job
+    # Environment variables available to all steps
     env:
       GH_PAT: ${{ secrets.PERSONAL_TOKEN }}
       BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
@@ -18,7 +18,9 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v3
         with:
-          fetch-depth: 0
+          # IMPORTANT: disable default GITHUB_TOKEN credentials so pushes
+          # use your PAT instead of github-actions[bot]
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -30,28 +32,24 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Configure git identity
-        run: |
-          git config user.name "Auto Data Updater"
-          git config user.email "runner@users.noreply.github.com"
-
       - name: Update NBA data bundle
         run: |
           python tools/update_nba_historical.py
 
-      - name: Commit and push updated data
+      - name: Show status for debugging
         run: |
-          # Show status for debugging
           git status
 
-          # Make sure origin uses PAT-based HTTPS URL
+      - name: Commit and push updated data
+        run: |
+          git config user.name "Auto Data Updater"
+          git config user.email "runner@users.noreply.github.com"
+
+          # Force origin to use your PAT
           git remote set-url origin https://x-access-token:${GH_PAT}@github.com/adeglin/Fantasy-Basketball-Sleeper-.git
 
-          # Stage JSON bundle (if present)
-          git add docs/data/nba_historical.json || echo "no file to add"
+          git add docs/data/nba_historical.json || echo "no file"
+          git commit -m "Automated data update [skip ci]" || echo "no changes"
 
-          # Commit only if there are real changes
-          git commit -m "Automated data update [skip ci]" || echo "no changes to commit"
-
-          # Push; don't fail the whole job if there's nothing new
+          # Push using the PAT (NOT github-actions[bot])
           git push origin main || echo "no changes pushed"
