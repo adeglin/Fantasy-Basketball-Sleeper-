@@ -1,116 +1,132 @@
 import json
-from datetime import datetime, timezone
-from pathlib import Path
+import os
+from datetime import datetime, date, timedelta
 
-import pandas as pd
-from nba_api.stats.endpoints import PlayerGameLogs
+from fetch_data import (
+    fetch_sleeper_league_metadata,
+    fetch_sleeper_rosters,
+    fetch_sleeper_players,
+    fetch_sleeper_transactions,
+    fetch_espn_injuries,
+    fetch_nba_schedule,
+    fetch_nba_game_logs_since,  # you may need to implement/rename this
+    fetch_sleeper_nba_metadata,
+)
 
-# Where we will store the historical NBA data
-HIST_PATH = Path("docs/data/nba_historical.json")
-
-# Configure which season to pull
-CURRENT_SEASON = "2025-26"
-SEASON_TYPE = "Regular Season"
-
-
-def parse_minutes_to_float(min_str: str) -> float:
-    """
-    Convert NBA 'MIN' strings to float minutes.
-    Examples: '35:21' -> 35.35, '23' -> 23.0, ''/None -> 0.0
-    """
-    if not isinstance(min_str, str) or not min_str.strip():
-        return 0.0
-
-    if ":" in min_str:
-        mins, secs = min_str.split(":", 1)
-        try:
-            mins_i = int(mins)
-            secs_i = int(secs)
-            return mins_i + secs_i / 60.0
-        except ValueError:
-            return 0.0
-    else:
-        try:
-            return float(min_str)
-        except ValueError:
-            return 0.0
+BUNDLE_PATH = "docs/data/nba_historical.json"
 
 
-def df_to_records(df: pd.DataFrame):
-    if df is None or df.empty:
-        return []
-    # Ensure datetimes are JSON-serializable
-    for col in df.columns:
-        if pd.api.types.is_datetime64_any_dtype(df[col]):
-            df[col] = df[col].dt.strftime("%Y-%m-%dT%H:%M:%S")
-    return df.to_dict(orient="records")
+def load_existing_bundle():
+    if not os.path.exists(BUNDLE_PATH):
+        return {
+            "meta": {
+                "last_updated": None,
+                "last_game_date": None,
+            },
+            "league": {
+                "info": {},
+                "users": {},
+                "rosters": {},
+                "transactions": [],
+                "players": {},
+            },
+            "nba": {
+                "games": [],              # list of game logs
+                "schedule": [],
+                "injuries": [],
+                "players": {},
+                "historical_stats": [],
+            },
+        }
+    with open(BUNDLE_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def get_last_game_date(bundle):
+    games = bundle.get("nba", {}).get("games", [])
+    if not games:
+        # if none, start a bit before season tipoff
+        return date(2024, 10, 1)  # adjust season start if needed
+
+    # assume games have a 'game_date' field
+    dates = []
+    for g in games:
+        d = g.get("game_date")
+        if d:
+            try:
+                dates.append(datetime.strptime(d, "%Y-%m-%d").date())
+            except ValueError:
+                pass
+    if not dates:
+        return date(2024, 10, 1)
+    return max(dates)
+
+
+def merge_game_logs(bundle, new_games):
+    existing_games = bundle["nba"].get("games", [])
+    existing_ids = {g["game_id"] for g in existing_games if "game_id" in g}
+
+    deduped_new = [g for g in new_games if g.get("game_id") not in existing_ids]
+    bundle["nba"]["games"] = existing_games + deduped_new
+    return bundle
 
 
 def main():
-    print(f"[INFO] Fetching full NBA game logs for {CURRENT_SEASON} ({SEASON_TYPE})")
+    bundle = load_existing_bundle()
+    last_game_date = get_last_game_date(bundle)
+    today = date.today()
 
-    # Pull all game logs for the season
-    logs_endpoint = PlayerGameLogs(
-        season_nullable=CURRENT_SEASON,
-        season_type_nullable=SEASON_TYPE,
-        timeout=60,
-    )
-    logs_df = logs_endpoint.get_data_frames()[0]
-    print(f"[INFO] Retrieved {len(logs_df)} game log rows")
+    # 1) NBA GAMES & SCHEDULE
+    # fetch only games after last_game_date
+    new_games = fetch_nba_game_logs_since(last_game_date + timedelta(days=1))
+    schedule = fetch_nba_schedule()  # often a full-season JSON
 
-    if logs_df.empty:
-        raise SystemExit("[ERROR] No logs returned from NBA API; aborting.")
+    bundle = merge_game_logs(bundle, new_games)
+    bundle["nba"]["schedule"] = schedule
 
-    # Normalize minutes
-    if "MIN" in logs_df.columns:
-        logs_df["MIN"] = logs_df["MIN"].apply(parse_minutes_to_float)
+    # 2) LEAGUE DATA
+    league_meta = fetch_sleeper_league_metadata()
+    rosters = fetch_sleeper_rosters()
+    players = fetch_sleeper_players()
+    transactions = fetch_sleeper_transactions()
 
-    # Make sure numeric columns are numeric
-    numeric_cols = ["MIN", "PTS", "REB", "AST", "STL", "BLK", "TOV"]
-    for col in numeric_cols:
-        if col in logs_df.columns:
-            logs_df[col] = pd.to_numeric(logs_df[col], errors="coerce").fillna(0)
+    bundle["league"]["info"] = league_meta
 
-    # Add season year column for clarity
-    logs_df["SEASON_YEAR"] = CURRENT_SEASON
+    # map users by user_id for lookup on frontend
+    users = {u["user_id"]: u for u in league_meta.get("users", [])} if "users" in league_meta else {}
+    bundle["league"]["users"] = users
 
-    # Build per-player season averages
-    group_cols = ["PLAYER_ID", "PLAYER_NAME", "TEAM_ABBREVIATION"]
-    stats_agg = logs_df.groupby(group_cols).agg(
-        GP=("GAME_ID", "nunique"),
-        MIN=("MIN", "mean"),
-        PTS=("PTS", "mean"),
-        REB=("REB", "mean"),
-        AST=("AST", "mean"),
-        STL=("STL", "mean"),
-        BLK=("BLK", "mean"),
-        TOV=("TOV", "mean"),
-    ).reset_index()
+    bundle["league"]["rosters"] = rosters
+    bundle["league"]["players"] = players
+    bundle["league"]["transactions"] = transactions
 
-    # Round for readability
-    for col in ["MIN", "PTS", "REB", "AST", "STL", "BLK", "TOV"]:
-        if col in stats_agg.columns:
-            stats_agg[col] = stats_agg[col].round(1)
+    # 3) INJURIES (parse team correctly)
+    injuries_raw = fetch_espn_injuries()
+    injuries = []
+    for inj in injuries_raw:
+        injuries.append({
+            "player_id": inj.get("id") or inj.get("playerId"),
+            "name": inj.get("name"),
+            "team": (inj.get("team") or {}).get("abbrev") or inj.get("teamAbbrev") or "N/A",
+            "status": inj.get("status"),
+            "detail": inj.get("details") or inj.get("comment"),
+            "source": "ESPN",
+        })
+    bundle["nba"]["injuries"] = injuries
 
-    # Prepare JSON structure
-    data = {
-        "meta": {
-            "generated_at_utc": datetime.now(timezone.utc).isoformat(),
-            "season": CURRENT_SEASON,
-            "season_type": SEASON_TYPE,
-        },
-        "player_gamelogs": df_to_records(logs_df),
-        "players_stats": df_to_records(stats_agg),
-    }
+    # 4) METADATA
+    sleeper_nba_meta = fetch_sleeper_nba_metadata()
+    bundle["nba"]["players"] = sleeper_nba_meta.get("players", {})
 
-    # Ensure output folder exists
-    HIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    bundle["meta"]["last_updated"] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    bundle["meta"]["last_game_date"] = get_last_game_date(bundle).strftime("%Y-%m-%d")
 
-    # Write JSON
-    with HIST_PATH.open("w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+    # 5) WRITE OUT
+    os.makedirs(os.path.dirname(BUNDLE_PATH), exist_ok=True)
+    with open(BUNDLE_PATH, "w", encoding="utf-8") as f:
+        json.dump(bundle, f, indent=2, sort_keys=False)
 
-    print(f"[OK] Wrote NBA historical data to {HIST_PATH.resolve()}")
+    print("Updated bundle written to", BUNDLE_PATH)
 
 
 if __name__ == "__main__":
