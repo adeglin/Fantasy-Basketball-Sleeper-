@@ -214,10 +214,8 @@ def fetch_nba_game_logs_since(start_date: date) -> List[Dict[str, Any]]:
     Requires BALLDONTLIE_API_KEY in environment.
     If not set or request fails, returns [] but does NOT raise.
     """
-    api_key = os.getenv("BALLDONTLIE_API_KEY")
-    if not api_key:
-        print("BALLDONTLIE_API_KEY not set; skipping game log fetch.")
-        return []
+    api_key = "dff1b999-16ba-417a-93ac-c2cdf81de883" ("BALLDONTLIE_API_KEY")
+    response = requests.get(api_url, headers={"Authorization": API_KEY})
 
     headers = {"Authorization": f"Bearer {api_key}"}
     base_url = "https://api.balldontlie.io/v1/stats"
