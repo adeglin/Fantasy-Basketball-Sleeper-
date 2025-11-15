@@ -1,63 +1,31 @@
-name: Update data bundle
-
+name: Update NBA Data
 on:
   schedule:
-    - cron: "0 8 * * *"  # 3 AM Eastern (8 AM UTC)
+    - cron: '0 12 * * *'   # Runs daily at 12:00 UTC (adjust as needed)
   workflow_dispatch:
 
 jobs:
-  update:
-    runs-on: self-hosted
-
-    env:
-      # Personal access token with repo:write permissions
-      GH_PAT: ${{ secrets.PERSONAL_TOKEN }}
-      # BallDontLie API key for NBA stats
-      BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
-
+  update_data:
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v3
 
-      - name: Show current commit
-        run: git log -1 --oneline || echo "No commits yet"
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
 
-      - name: Install Python dependencies (if any)
+      - name: Install dependencies
         run: |
-          if [ -f requirements.txt ]; then
-            python3 -m pip install --upgrade pip
-            python3 -m pip install -r requirements.txt
-          else
-            echo "No requirements.txt, skipping pip install"
-          fi
+          python -m pip install --upgrade pip
+          pip install requests
 
-      - name: Run data updater
+      - name: Run update script
+        run: python tools/update_nba_historical.py
+
+      - name: Commit and push changes
         run: |
-          python3 tools/update_nba_historical.py
-
-      - name: Show status for debugging
-        run: |
-          echo
-          echo "========== GIT STATUS =========="
-          git status
-          echo "================================"
-          ls -lh docs/data || true
-
-      - name: Commit and push updated data
-        run: |
-          set -e
-
-          git config user.name "Auto Data Updater"
-          git config user.email "runner@users.noreply.github.com"
-
-          # Make sure pushes use your PAT and NOT the default github-actions[bot]
-          git remote set-url origin https://x-access-token:${GH_PAT}@github.com/adeglin/Fantasy-Basketball-Sleeper-.git
-
-          git add docs/data/nba_historical.json || echo "Nothing to add"
-          if git diff --cached --quiet; then
-            echo "No changes to commit."
-            exit 0
-          fi
-
-          git commit -m "Automated data update [skip ci]"
-          git push origin main
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add .
+          git commit -m "Update NBA data" || exit 0
+          git push https://<YOUR_PERSONAL_ACCESS_TOKEN>@github.com/<YOUR_GITHUB_USERNAME>/Fantasy-Basketball-Sleeper-.git HEAD:main
