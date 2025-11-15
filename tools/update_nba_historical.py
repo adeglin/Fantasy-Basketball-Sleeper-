@@ -12,7 +12,7 @@ import requests
 LEAGUE_ID = "1202885172400234496"
 
 # NBA season year for schedule (e.g., 2024 for 2024-25 season)
-NBA_SEASON_YEAR = 2024
+NBA_SEASON_YEAR = 2025
 
 # Path to the JSON bundle (repo root)
 BUNDLE_PATH = os.path.join("docs", "data", "nba_historical.json")
