@@ -14,23 +14,25 @@ jobs:
       REPO: adeglin/Fantasy-Basketball-Sleeper-
 
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
       - name: Set up git identity
         run: |
           git config user.name "Auto Data Updater"
           git config user.email "runner@users.noreply.github.com"
 
-      - name: Install Python dependencies
-        run: |
-          python3 -m pip install --upgrade pip
-          python3 -m pip install -r requirements.txt
-
       - name: Update NBA data bundle
         run: |
-          # Ensure the repo root is on PYTHONPATH so `from fetch_data import ...` works
-          export PYTHONPATH="$PYTHONPATH:$(pwd)"
           python3 tools/update_nba_historical.py
 
       - name: Commit and push updated data
@@ -39,4 +41,4 @@ jobs:
           git remote set-url origin https://x-access-token:${GH_PAT}@github.com/${REPO}.git
           git add docs/data/nba_historical.json || echo "no file to add"
           git commit -m "Automated data update [skip ci]" || echo "no changes to commit"
-          git push origin main
+          git push origin main || echo "no changes pushed"
