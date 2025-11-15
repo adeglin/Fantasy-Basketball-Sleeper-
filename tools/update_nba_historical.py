@@ -1,6 +1,11 @@
-import json
 import os
-from datetime import datetime, date, timedelta
+import sys
+
+# Ensure we can import fetch_data.py from the repo root
+CURRENT_DIR = os.path.dirname(__file__)
+REPO_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, os.pardir))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 
 from fetch_data import (
     fetch_sleeper_league_metadata,
