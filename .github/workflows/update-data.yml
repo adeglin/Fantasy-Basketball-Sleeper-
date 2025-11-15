@@ -15,8 +15,7 @@ jobs:
       BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v3
 
       - name: Set up git identity
         run: |
@@ -29,19 +28,15 @@ jobs:
 
       - name: Commit and push updated data
         run: |
+          # Show current status
           git status
 
-          # Remove GitHub Actions default auth header so PAT is used instead
-          git config --local --unset-all http.https://github.com/.extraheader || true
-
-          # Set origin remote to use PAT
+          # Make sure the remote uses the PAT
           git remote set-url origin https://x-access-token:${GH_PAT}@github.com/${REPO}.git
 
-          # Add JSON file
+          # Stage and commit the updated bundle
           git add docs/data/nba_historical.json || echo "no file to add"
-
-          # Commit changes
           git commit -m "Automated data update [skip ci]" || echo "no changes to commit"
 
-          # Push
+          # Push to main
           git push origin main || echo "no changes pushed"
