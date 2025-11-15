@@ -9,34 +9,49 @@ jobs:
   update:
     runs-on: self-hosted
 
+    # Environment variables available to all steps in this job
     env:
       GH_PAT: ${{ secrets.PERSONAL_TOKEN }}
-      REPO: adeglin/Fantasy-Basketball-Sleeper-
       BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
 
     steps:
-      - uses: actions/checkout@v3
+      - name: Check out repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
 
-      - name: Set up git identity
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Configure git identity
         run: |
           git config user.name "Auto Data Updater"
           git config user.email "runner@users.noreply.github.com"
 
       - name: Update NBA data bundle
         run: |
-          python3 tools/update_nba_historical.py
+          python tools/update_nba_historical.py
 
       - name: Commit and push updated data
         run: |
-          # Show current status
+          # Show status for debugging
           git status
 
-          # Make sure the remote uses the PAT
-          git remote set-url origin https://x-access-token:${GH_PAT}@github.com/${REPO}.git
+          # Make sure origin uses PAT-based HTTPS URL
+          git remote set-url origin https://x-access-token:${GH_PAT}@github.com/adeglin/Fantasy-Basketball-Sleeper-.git
 
-          # Stage and commit the updated bundle
+          # Stage JSON bundle (if present)
           git add docs/data/nba_historical.json || echo "no file to add"
+
+          # Commit only if there are real changes
           git commit -m "Automated data update [skip ci]" || echo "no changes to commit"
 
-          # Push to main
+          # Push; don't fail the whole job if there's nothing new
           git push origin main || echo "no changes pushed"
