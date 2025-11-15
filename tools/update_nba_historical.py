@@ -1,10 +1,15 @@
-import json
-from datetime import date, timedelta
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 from fetch_data import (
     fetch_nba_stats_by_date,
     fetch_sleeper_league_metadata,
     get_sleeper_players_map
 )
+import json
+from datetime import date, timedelta
+
 
 # Path to the JSON file storing historical NBA stats
 DATA_PATH = "data/nba_historical.json"  # adjust path if needed
