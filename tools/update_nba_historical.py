@@ -9,7 +9,7 @@ import requests
 # CONFIG – EDIT THIS
 # ================================
 # Set this to your Sleeper NBA league ID (string)
-LEAGUE_ID = "YOUR_SLEEPER_LEAGUE_ID"
+LEAGUE_ID = "1202885172400234496"
 
 # NBA season year for schedule (e.g., 2024 for 2024-25 season)
 NBA_SEASON_YEAR = 2024
