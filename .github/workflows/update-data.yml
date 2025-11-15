@@ -12,9 +12,10 @@ jobs:
     env:
       GH_PAT: ${{ secrets.PERSONAL_TOKEN }}
       REPO: adeglin/Fantasy-Basketball-Sleeper-
+      BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
 
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v3
 
       - name: Set up git identity
@@ -28,18 +29,19 @@ jobs:
 
       - name: Commit and push updated data
         run: |
-          # Show current status
           git status
 
-          # Remove the GitHub Actions default auth header so our PAT is used instead
+          # Remove GitHub Actions default auth header so PAT is used instead
           git config --local --unset-all http.https://github.com/.extraheader || true
 
-          # Point origin at PAT-authenticated URL
+          # Set origin remote to use PAT
           git remote set-url origin https://x-access-token:${GH_PAT}@github.com/${REPO}.git
 
-          # Add and commit the updated JSON
+          # Add JSON file
           git add docs/data/nba_historical.json || echo "no file to add"
+
+          # Commit changes
           git commit -m "Automated data update [skip ci]" || echo "no changes to commit"
 
-          # Push to main using PAT
+          # Push
           git push origin main || echo "no changes pushed"
