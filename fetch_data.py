@@ -1,281 +1,302 @@
-import time
-import json
-import unicodedata
-from datetime import datetime, timezone
-from pathlib import Path
+# fetch_data.py
+
+import os
+import datetime as dt
+from typing import Any, Dict, List, Optional
 
 import requests
-import pandas as pd
-from nba_api.stats.endpoints import (
-    LeagueDashPlayerStats,
-    PlayerGameLogs,
-)
 
-# -----------------------------
-# CONFIG
-# -----------------------------
-LEAGUE_ID = "1202885172400234496"
-CURRENT_SEASON = "2025-26"          # NBA.com format
-HISTORICAL_SEASONS = ["2023-24", "2024-25"]  # seasons you want once-and-done
-SEASON_TYPE = "Regular Season"
+# ---- Configuration ---------------------------------------------------------
 
-DOCS_DATA_DIR = Path("docs/data")
-DOCS_DATA_DIR.mkdir(parents=True, exist_ok=True)
+SLEEPER_BASE_URL = "https://api.sleeper.app/v1"
+BALLDONTLIE_BASE_URL = "https://api.balldontlie.io/v1"
+ESPN_INJURIES_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/injuries"
 
-# Per-season cache files (so we only fetch historical once)
-def season_stats_path(season: str) -> Path:
-    return DOCS_DATA_DIR / f"nba_season_stats_{season}.json"
-
-def season_gamelogs_path(season: str) -> Path:
-    return DOCS_DATA_DIR / f"nba_game_logs_{season}.json"
+# Hard-code your Sleeper league id here so the rest of the code can just import and use it.
+SLEEPER_LEAGUE_ID = "1202885172400234496"
 
 
-def safe_get(url, desc, timeout=10):
-    print(f"[HTTP] {desc} ... {url}")
+def _get_ball_dont_lie_headers() -> Dict[str, str]:
+    """
+    Build headers for BALLDONTLIE requests.
+
+    Reads the API key from the BALLDONTLIE_API_KEY environment variable.
+    """
+    api_key = os.getenv("BALLDONTLIE_API_KEY")
+    if not api_key:
+        # Caller will usually just skip if this is missing.
+        print("BALLDONTLIE_API_KEY not set; requests to BallDontLie will fail.")
+        return {}
+    return {"Authorization": api_key}
+
+
+def _http_get(
+    url: str,
+    params: Optional[Dict[str, Any]] = None,
+    headers: Optional[Dict[str, str]] = None,
+    timeout: int = 15,
+) -> Optional[Dict[str, Any]]:
+    """
+    Small helper around requests.get with basic error handling.
+
+    Returns parsed JSON dict on success, or None on failure.
+    """
     try:
-        resp = requests.get(url, timeout=timeout)
+        resp = requests.get(url, params=params, headers=headers, timeout=timeout)
         resp.raise_for_status()
         return resp.json()
-    except Exception as e:
-        print(f"[WARN] Error fetching {desc}: {e}")
-        return None
-
-
-def norm_name(s):
-    """Normalize a player name for matching / joins."""
-    if not isinstance(s, str):
-        return ""
-    s = unicodedata.normalize("NFKD", s)
-    s = "".join(c for c in s if not unicodedata.combining(c))
-    return " ".join(s.lower().strip().split())
-
-
-# -----------------------------
-# Sleeper players metadata
-# -----------------------------
-def fetch_sleeper_players():
-    url = "https://api.sleeper.app/v1/players/nba"
-    data = safe_get(url, "Sleeper NBA players", timeout=25)
-    if not data:
-        return []
-
-    records = []
-    for pid, p in data.items():
-        records.append({
-            "sleeper_player_id": pid,
-            "full_name": p.get("full_name"),
-            "first_name": p.get("first_name"),
-            "last_name": p.get("last_name"),
-            "position": p.get("position"),
-            "team": p.get("team"),
-            "fantasy_positions": p.get("fantasy_positions"),
-            "status": p.get("status"),
-            "injury_status": p.get("injury_status"),
-            "injury_notes": p.get("injury_notes"),
-            "age": p.get("age"),
-            "years_exp": p.get("years_exp"),
-            "active": p.get("active"),
-        })
-    print(f"[Sleeper] Players metadata rows: {len(records)}")
-    return records
-
-
-# -----------------------------
-# Sleeper league / rosters / transactions
-# -----------------------------
-def fetch_sleeper_block():
-    base_league_url = f"https://api.sleeper.app/v1/league/{LEAGUE_ID}"
-
-    league = safe_get(base_league_url, "Sleeper league info")
-    if not league:
-        raise SystemExit("Could not load league info from Sleeper")
-
-    users = safe_get(f"{base_league_url}/users", "Sleeper league users") or []
-    rosters = safe_get(f"{base_league_url}/rosters", "Sleeper rosters") or []
-
-    users_df = pd.DataFrame(users) if users else pd.DataFrame(columns=["user_id", "display_name"])
-    rosters_df = pd.DataFrame(rosters) if rosters else pd.DataFrame()
-
-    if not rosters_df.empty and not users_df.empty:
-        rosters_df = rosters_df.merge(
-            users_df[["user_id", "display_name"]],
-            left_on="owner_id",
-            right_on="user_id",
-            how="left",
-        )
-
-    # Exploded rosters to player-level (each row = one player on one roster)
-    rosters_exploded = pd.DataFrame()
-    if not rosters_df.empty:
-        rosters_exploded = rosters_df.explode("players", ignore_index=True)
-        rosters_exploded = rosters_exploded.rename(columns={"players": "sleeper_player_id"})
-        rosters_exploded["sleeper_player_id"] = rosters_exploded["sleeper_player_id"].astype(str)
-
-    # Transactions by week (using league settings to know current week)
-    settings = league.get("settings", {}) or {}
-    max_week = settings.get("leg") or settings.get("last_scored_leg") or 1
-    max_week = int(max_week)
-
-    transactions_all = []
-    for week in range(1, max_week + 1):
-        tx = safe_get(f"{base_league_url}/transactions/{week}", f"Sleeper transactions week {week}")
-        if tx and isinstance(tx, list):
-            for t in tx:
-                t["week"] = week
-                transactions_all.append(t)
-        time.sleep(0.1)
-
-    transactions_df = pd.DataFrame(transactions_all) if transactions_all else pd.DataFrame()
-
-    # Sleeper players metadata
-    players_list = fetch_sleeper_players()
-
-    sleeper_block = {
-        "league": league,
-        "users": users_df.to_dict(orient="records"),
-        "rosters": rosters_df.to_dict(orient="records"),
-        "rosters_players": rosters_exploded.to_dict(orient="records"),
-        "transactions": transactions_df.to_dict(orient="records"),
-        "players": players_list,
-    }
-    return sleeper_block
-
-
-# -----------------------------
-# NBA season stats + game logs
-# -----------------------------
-def fetch_or_load_nba_season_stats(season: str) -> pd.DataFrame:
-    path = season_stats_path(season)
-    if path.exists() and season in HISTORICAL_SEASONS:
-        print(f"[CACHE] Loading NBA season stats from {path}")
-        return pd.read_json(path)
-
-    print(f"[NBA] Fetching season stats for {season} ...")
-    stats = LeagueDashPlayerStats(
-        season=season,
-        season_type_all_star=SEASON_TYPE,
-        per_mode_detailed="PerGame",
-        timeout=60,
-    )
-    df = stats.get_data_frames()[0]
-    df["MIN"] = pd.to_numeric(df["MIN"], errors="coerce").fillna(0)
-    df = df[df["MIN"] > 0].copy()
-
-    if season in HISTORICAL_SEASONS:
-        df.to_json(path, orient="records")
-        print(f"[CACHE] Saved NBA season stats {season} -> {path}")
-
-    return df
-
-
-def fetch_or_load_nba_gamelogs(season: str) -> pd.DataFrame:
-    path = season_gamelogs_path(season)
-    if path.exists() and season in HISTORICAL_SEASONS:
-        print(f"[CACHE] Loading NBA game logs from {path}")
-        return pd.read_json(path)
-
-    print(f"[NBA] Fetching game logs for {season} ...")
-    logs = PlayerGameLogs(
-        season_nullable=season,
-        season_type_nullable=SEASON_TYPE,
-        timeout=60,
-    )
-    df = logs.get_data_frames()[0]
-
-    if season in HISTORICAL_SEASONS:
-        df.to_json(path, orient="records")
-        print(f"[CACHE] Saved NBA game logs {season} -> {path}")
-
-    return df
-
-
-def fetch_nba_schedule():
-    print("[NBA] Fetching league schedule JSON ...")
-    schedule_url = "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2.json"
-    schedule_json = safe_get(schedule_url, "NBA league schedule", timeout=20)
-
-    if not schedule_json or "leagueSchedule" not in schedule_json:
-        print("[WARN] Could not load NBA schedule.")
-        return []
-
-    days = schedule_json["leagueSchedule"]["gameDates"]
-    games = []
-    for day in days:
-        for g in day.get("games", []):
-            games.append(g)
-
-    schedule_raw = pd.json_normalize(games, sep="_")
-    schedule_keep_cols = [
-        "gameId",
-        "gameCode",
-        "gameDate",
-        "gameDateTimeUTC",
-        "gameStatus",
-        "gameStatusText",
-        "homeTeam_teamId",
-        "homeTeam_teamTricode",
-        "homeTeam_teamName",
-        "homeTeam_score",
-        "awayTeam_teamId",
-        "awayTeam_teamTricode",
-        "awayTeam_teamName",
-        "awayTeam_score",
-    ]
-    for col in schedule_keep_cols:
-        if col not in schedule_raw.columns:
-            schedule_raw[col] = pd.NA
-
-    schedule_df = schedule_raw[schedule_keep_cols].sort_values("gameDate")
-    return schedule_df.to_dict(orient="records")
-
-
-# -----------------------------
-# MAIN: build data bundle
-# -----------------------------
-def main():
-    print("=== Building data bundle ===")
-
-    # 1) Sleeper
-    sleeper_block = fetch_sleeper_block()
-
-    # 2) NBA seasons (historical + current)
-    nba_seasons = {}
-    for season in HISTORICAL_SEASONS + [CURRENT_SEASON]:
+    except requests.HTTPError as e:
         try:
-            season_stats_df = fetch_or_load_nba_season_stats(season)
-            season_logs_df = fetch_or_load_nba_gamelogs(season)
-        except Exception as e:
-            print(f"[WARN] Skipping NBA season {season} due to error: {e}")
+            status = e.response.status_code
+        except Exception:
+            status = "?"
+        print(f"HTTP error {status} for GET {url} params={params}: {e}")
+    except Exception as e:
+        print(f"Error during GET {url} params={params}: {e}")
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Sleeper helpers
+# ---------------------------------------------------------------------------
+
+
+def fetch_sleeper_league_metadata(league_id: str = SLEEPER_LEAGUE_ID) -> Dict[str, Any]:
+    """
+    Fetch base league metadata and users for the Sleeper league.
+    """
+    league_url = f"{SLEEPER_BASE_URL}/league/{league_id}"
+    users_url = f"{SLEEPER_BASE_URL}/league/{league_id}/users"
+
+    league = _http_get(league_url) or {}
+    users = _http_get(users_url) or []
+
+    return {
+        "league": league,
+        "users": users,
+    }
+
+
+def fetch_sleeper_rosters(league_id: str = SLEEPER_LEAGUE_ID) -> List[Dict[str, Any]]:
+    """
+    Fetch all rosters for the league.
+    """
+    url = f"{SLEEPER_BASE_URL}/league/{league_id}/rosters"
+    data = _http_get(url)
+    if not isinstance(data, list):
+        return []
+    return data
+
+
+def fetch_sleeper_players() -> Dict[str, Any]:
+    """
+    Fetch the full Sleeper NBA player pool.
+
+    NOTE: This is a *large* payload but we only hit it once per update.
+    """
+    url = f"{SLEEPER_BASE_URL}/players/nba"
+    data = _http_get(url)
+    if not isinstance(data, dict):
+        return {}
+    return data
+
+
+def fetch_sleeper_transactions(
+    league_id: str = SLEEPER_LEAGUE_ID,
+    max_weeks: int = 30,
+) -> List[Dict[str, Any]]:
+    """
+    Fetch all transactions for the league, iterating over weeks 1..max_weeks.
+
+    Sleeper's NBA season is usually shorter, but 30 is a safe cap.
+    """
+    all_tx: List[Dict[str, Any]] = []
+
+    for week in range(1, max_weeks + 1):
+        url = f"{SLEEPER_BASE_URL}/league/{league_id}/transactions/{week}"
+        tx = _http_get(url)
+        if isinstance(tx, list) and tx:
+            all_tx.extend(tx)
+        else:
+            # If it's empty or not a list, just move on.
             continue
 
-        nba_seasons[season] = {
-            "season_stats": season_stats_df.to_dict(orient="records"),
-            "game_logs": season_logs_df.to_dict(orient="records"),
+    print(f"Fetched {len(all_tx)} total transactions from Sleeper.")
+    return all_tx
+
+
+def fetch_sleeper_nba_metadata() -> Dict[str, Any]:
+    """
+    Wrapper to fetch Sleeper NBA player metadata.
+
+    Kept separate so update_nba_historical.py has a clean import.
+    """
+    return fetch_sleeper_players()
+
+
+# ---------------------------------------------------------------------------
+# BallDontLie helpers – game logs & schedule
+# ---------------------------------------------------------------------------
+
+
+def fetch_nba_game_logs_since(
+    start_date: dt.date,
+    end_date: Optional[dt.date] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Fetch NBA box-score style game logs from BALLDONTLIE starting the day
+    AFTER `start_date` up through `end_date` (inclusive).
+
+    update_nba_historical.py passes in the last date present in
+    the bundle and then appends whatever this function returns.
+    """
+    headers = _get_ball_dont_lie_headers()
+    if not headers:
+        # API key missing – let the caller decide what to do.
+        return []
+
+    if end_date is None:
+        end_date = dt.date.today()
+
+    logs: List[Dict[str, Any]] = []
+
+    # We assume the caller passes the last date already in the bundle,
+    # so we start at +1 day.
+    current = start_date + dt.timedelta(days=1)
+
+    while current <= end_date:
+        date_str = current.isoformat()
+        print(f"Fetching logs for {date_str}")
+
+        params: Dict[str, Any] = {
+            "dates[]": date_str,
+            "per_page": 100,
         }
 
-    # 3) NBA schedule
-    schedule = fetch_nba_schedule()
+        while True:
+            data = _http_get(
+                f"{BALLDONTLIE_BASE_URL}/stats",
+                params=params,
+                headers=headers,
+            )
+            if not data or "data" not in data:
+                break
 
-    # 4) Build final bundle
-    bundle = {
-        "meta": {
-            "generated_at_utc": datetime.now(timezone.utc).isoformat(),
-            "current_season": CURRENT_SEASON,
-            "historical_seasons": HISTORICAL_SEASONS,
-        },
-        "sleeper": sleeper_block,
-        "nba": {
-            "seasons": nba_seasons,
-            "schedule": schedule,
-        },
+            day_logs = data.get("data", [])
+            if day_logs:
+                logs.extend(day_logs)
+
+            meta = data.get("meta") or {}
+            next_cursor = meta.get("next_cursor")
+            if next_cursor:
+                # Cursor-based pagination
+                params["cursor"] = next_cursor
+            else:
+                break
+
+        current += dt.timedelta(days=1)
+
+    print(f"Fetched {len(logs)} new game logs from BallDontLie.")
+    return logs
+
+
+def fetch_nba_schedule(season: int) -> List[Dict[str, Any]]:
+    """
+    Fetch NBA schedule for a given season using BALLDONTLIE `games` endpoint.
+
+    This replaces the older data.nba.net schedule call, which can have
+    SSL issues on some hosts.
+    """
+    headers = _get_ball_dont_lie_headers()
+    if not headers:
+        return []
+
+    games: List[Dict[str, Any]] = []
+    params: Dict[str, Any] = {
+        "seasons[]": season,
+        "per_page": 100,
     }
 
-    out_path = DOCS_DATA_DIR / "data_bundle.json"
-    with out_path.open("w", encoding="utf-8") as f:
-        json.dump(bundle, f, ensure_ascii=False, separators=(",", ":"))
+    while True:
+        data = _http_get(
+            f"{BALLDONTLIE_BASE_URL}/games", params=params, headers=headers
+        )
+        if not data or "data" not in data:
+            break
 
-    print(f"[OK] Wrote data bundle -> {out_path.resolve()}")
+        page_games = data.get("data", [])
+        if page_games:
+            games.extend(page_games)
+
+        meta = data.get("meta") or {}
+        next_cursor = meta.get("next_cursor")
+        if next_cursor:
+            params["cursor"] = next_cursor
+        else:
+            break
+
+    print(f"Fetched {len(games)} games for season {season} from BallDontLie.")
+    return games
 
 
-if __name__ == "__main__":
-    main()
+# ---------------------------------------------------------------------------
+# ESPN injuries
+# ---------------------------------------------------------------------------
+
+
+def fetch_espn_injuries() -> List[Dict[str, Any]]:
+    """
+    Fetch NBA injuries from ESPN's public site API and normalize into a
+    simple list of dicts: one entry per injured player.
+
+    Returned schema (per entry):
+
+        {
+            "player_id": str,
+            "player_name": str,
+            "position": str,
+            "team_abbr": str,
+            "team_name": str,
+            "status": str,   # e.g. 'Out', 'Day-To-Day'
+            "comment": str,
+            "updated": str,  # ISO8601 or ESPN-style date string
+        }
+    """
+    raw = _http_get(ESPN_INJURIES_URL)
+    if not raw:
+        print("Failed to fetch injuries from ESPN.")
+        return []
+
+    league = raw.get("league") or {}
+    teams = league.get("teams") or []
+
+    results: List[Dict[str, Any]] = []
+
+    for team_entry in teams:
+        team_info = team_entry.get("team") or {}
+        team_abbr = team_info.get("abbreviation") or ""
+        team_name = team_info.get("displayName") or team_info.get("name") or ""
+
+        injuries = team_entry.get("injuries") or []
+        for inj in injuries:
+            athlete = inj.get("athlete") or {}
+            status = inj.get("status") or {}
+            status_type = status.get("type") or {}
+
+            results.append(
+                {
+                    "player_id": str(athlete.get("id", "")),
+                    "player_name": athlete.get("displayName") or "",
+                    "position": (athlete.get("position") or {}).get("abbreviation", "")
+                    if isinstance(athlete.get("position"), dict)
+                    else "",
+                    "team_abbr": team_abbr,
+                    "team_name": team_name,
+                    "status": status_type.get("name") or "",
+                    "comment": status.get("details") or "",
+                    "updated": status.get("updated") or "",
+                }
+            )
+
+    print(f"Parsed {len(results)} ESPN injuries.")
+    return results
