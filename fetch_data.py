@@ -1,236 +1,277 @@
 import os
-import json
-from datetime import date, timedelta, datetime
+import time
+import datetime as dt
+from typing import Any, Dict, List, Optional
 
 import requests
 
 # -----------------------------
-# Configuration
+# Constants / Config
 # -----------------------------
 
-SLEEPER_BASE_URL = "https://api.sleeper.app/v1"
-SLEEPER_LEAGUE_ID = "1202885172400234496"  # your league
+SLEEPER_LEAGUE_ID = "1202885172400234496"
+SLEEPER_BASE = "https://api.sleeper.app/v1"
 
-BALLDONTLIE_BASE_URL = "https://api.balldontlie.io/v1"
+BALLDONTLIE_BASE = "https://api.balldontlie.io/v1"
 ESPN_INJURIES_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/injuries"
 
-# NBA schedule (this host has a funky cert; we treat failures as non-fatal)
-NBA_SCHEDULE_URL_TEMPLATE = "https://data.nba.net/prod/v2/{season_year}/schedule.json"
+# If this causes SSL issues on your VPS, update the schedule function below
+NBA_SCHEDULE_URL_TEMPLATE = "https://data.nba.net/prod/v2/{season}/schedule.json"
 
 
 # -----------------------------
 # Helpers
+# -----------------------------------------
+
+def _balldontlie_headers() -> Dict[str, str]:
+    """
+    Build headers for BallDontLie API using env var BALLDONTLIE_API_KEY.
+
+    401s from the API usually mean:
+      - Missing/incorrect API key, OR
+      - Your account tier does not include the endpoint (e.g., /stats).
+    """
+    api_key = os.getenv("BALLDONTLIE_API_KEY")
+    if not api_key:
+        print("BALLDONTLIE_API_KEY not set; skipping game log fetch.")
+        return {}
+
+    # Per BallDontLie docs: header must be Authorization: YOUR_API_KEY
+    # (no 'Bearer' prefix).
+    return {"Authorization": api_key}
+
+
+def _safe_get(url: str, *, params: Optional[Dict[str, Any]] = None,
+              headers: Optional[Dict[str, str]] = None,
+              timeout: int = 30) -> Optional[requests.Response]:
+    """Simple wrapper that logs and swallows errors instead of crashing."""
+    try:
+        resp = requests.get(url, params=params, headers=headers, timeout=timeout)
+        resp.raise_for_status()
+        return resp
+    except requests.HTTPError as e:
+        print(f"HTTP error for {url}: {e}")
+    except Exception as e:
+        print(f"Error requesting {url}: {e}")
+    return None
+
+
+# -----------------------------
+# Sleeper league / rosters / transactions / players
 # -----------------------------
 
-def _get_ball_dontlie_headers():
-    """
-    Build headers for BallDontLie.
+def fetch_sleeper_league_metadata() -> Dict[str, Any]:
+    """Return basic league metadata + users."""
+    league_url = f"{SLEEPER_BASE}/league/{SLEEPER_LEAGUE_ID}"
+    users_url = f"{SLEEPER_BASE}/league/{SLEEPER_LEAGUE_ID}/users"
 
-    IMPORTANT: Docs say the key must be in the header exactly as:
-        Authorization: YOUR_API_KEY
-    NOT "Bearer ..." – just the raw key.
-    """
-    api_key = os.environ.get("BALLDONTLIE_API_KEY")
-    if not api_key:
-        return None
+    league_resp = _safe_get(league_url)
+    users_resp = _safe_get(users_url)
+
+    league = league_resp.json() if league_resp is not None else {}
+    users = users_resp.json() if users_resp is not None else []
+
+    print(f"Fetched Sleeper league metadata (league: {bool(league)}, users: {len(users)})")
+
     return {
-        "Authorization": api_key
+        "league": league,
+        "users": users,
     }
 
 
-def _season_year_for_today():
-    """Very simple season-year heuristic: if month >= 8, treat as that year, else previous year."""
-    today = date.today()
-    if today.month >= 8:
-        return today.year
-    return today.year - 1
+def fetch_sleeper_rosters() -> List[Dict[str, Any]]:
+    """Return list of Sleeper rosters for the league."""
+    url = f"{SLEEPER_BASE}/league/{SLEEPER_LEAGUE_ID}/rosters"
+    resp = _safe_get(url)
+    rosters = resp.json() if resp is not None else []
+    print(f"Fetched {len(rosters)} Sleeper rosters.")
+    return rosters
 
 
-# -----------------------------
-# BallDontLie game logs
-# -----------------------------
-
-def fetch_nba_game_logs_since(start_date: date):
+def fetch_sleeper_players() -> Dict[str, Any]:
     """
-    Fetch NBA game logs from BallDontLie starting (inclusive) at start_date up to today.
+    Return the full Sleeper NBA player pool.
 
-    Uses /v1/stats with dates[] filter.
-    NOTE: This only fetches the first page (per_page=100) per day.
-    For most fantasy usage that's fine; you can extend later to follow meta.next_cursor.
+    This is a big dict keyed by Sleeper player_id.
     """
-    headers = _get_ball_dontlie_headers()
-    if not headers:
-        print("BALLDONTLIE_API_KEY not set; skipping game log fetch.")
-        return []
-
-    logs = []
-    today = date.today()
-    current = start_date
-
-    while current <= today:
-        iso = current.isoformat()
-        print(f"Fetching logs for {iso}")
-        params = {
-            "dates[]": iso,
-            "per_page": 100,  # first page; extend later with cursor if needed
-        }
-        url = f"{BALLDONTLIE_BASE_URL}/stats"
-
-        try:
-            resp = requests.get(url, headers=headers, params=params, timeout=20)
-            resp.raise_for_status()
-        except requests.RequestException as e:
-            print(f"Failed to fetch logs for {iso}: {e}")
-            current += timedelta(days=1)
-            continue
-
-        payload = resp.json() or {}
-        day_logs = payload.get("data", [])
-        logs.extend(day_logs)
-
-        # TODO: handle pagination if meta.next_cursor present
-        # meta = payload.get("meta") or {}
-        # next_cursor = meta.get("next_cursor")
-
-        current += timedelta(days=1)
-
-    print(f"Fetched {len(logs)} new game logs.")
-    return logs
+    url = f"{SLEEPER_BASE}/players/nba"
+    resp = _safe_get(url)
+    players = resp.json() if resp is not None else {}
+    print(f"Fetched {len(players)} Sleeper players.")
+    return players
 
 
-# -----------------------------
-# NBA schedule (NBA JSON CDN)
-# -----------------------------
-
-def fetch_nba_schedule():
+def fetch_sleeper_transactions(max_weeks: int = 30) -> List[Dict[str, Any]]:
     """
-    Fetch NBA schedule from data.nba.net.
+    Fetch league transactions for weeks 1..max_weeks.
 
-    data.nba.net currently uses a cert with a hostname mismatch for 'data.nba.net'
-    on some environments, which can cause SSL errors. We catch and log but don't crash.
+    Sleeper's NBA "weeks" are just internal periods; this mirrors what we
+    saw in your logs (1–30).
     """
-    season_year = _season_year_for_today()
-    url = NBA_SCHEDULE_URL_TEMPLATE.format(season_year=season_year)
-    print(f"GET {url}")
+    all_tx: List[Dict[str, Any]] = []
 
-    try:
-        # If cert errors keep annoying you, you *could* use verify=False,
-        # but that's less secure. For now we keep verify=True and just log failures.
-        resp = requests.get(url, timeout=20)
-        resp.raise_for_status()
-    except requests.RequestException as e:
-        print(f"Failed to fetch NBA schedule: {e}")
-        return []
-
-    try:
-        data = resp.json()
-    except Exception as e:
-        print(f"Failed to parse NBA schedule JSON: {e}")
-        return []
-
-    # The exact structure isn't critical here; we just return whatever JSON gives.
-    return data
-
-
-# -----------------------------
-# Sleeper league data
-# -----------------------------
-
-def fetch_sleeper_league_metadata():
-    """Return league object with an added 'users' key."""
-    league_url = f"{SLEEPER_BASE_URL}/league/{SLEEPER_LEAGUE_ID}"
-    users_url = f"{SLEEPER_BASE_URL}/league/{SLEEPER_LEAGUE_ID}/users"
-
-    print(f"GET {league_url}")
-    league_resp = requests.get(league_url, timeout=20)
-    league_resp.raise_for_status()
-    league = league_resp.json()
-
-    print(f"GET {users_url}")
-    users_resp = requests.get(users_url, timeout=20)
-    users_resp.raise_for_status()
-    users = users_resp.json()
-
-    league["users"] = users
-    return league
-
-
-def fetch_sleeper_rosters():
-    """Return list of Sleeper rosters for your league."""
-    url = f"{SLEEPER_BASE_URL}/league/{SLEEPER_LEAGUE_ID}/rosters"
-    print(f"GET {url}")
-    resp = requests.get(url, timeout=20)
-    resp.raise_for_status()
-    return resp.json()
-
-
-def fetch_sleeper_transactions(max_weeks: int = 30):
-    """
-    Fetch all transactions from week 1..max_weeks (inclusive).
-    Sleeper uses /transactions/{week}.
-    """
-    all_tx = []
     for week in range(1, max_weeks + 1):
-        url = f"{SLEEPER_BASE_URL}/league/{SLEEPER_LEAGUE_ID}/transactions/{week}"
-        print(f"GET {url}")
-        try:
-            resp = requests.get(url, timeout=20)
-            resp.raise_for_status()
-        except requests.RequestException as e:
-            print(f"Failed to fetch transactions for week {week}: {e}")
+        url = f"{SLEEPER_BASE}/league/{SLEEPER_LEAGUE_ID}/transactions/{week}"
+        resp = _safe_get(url)
+        if resp is None:
             continue
 
-        data = resp.json() or []
-        if data:
-            all_tx.extend(data)
+        week_tx = resp.json() or []
+        if week_tx:
+            print(f"Week {week}: fetched {len(week_tx)} transactions.")
+            all_tx.extend(week_tx)
 
     print(f"Fetched {len(all_tx)} total transactions.")
     return all_tx
 
 
-def fetch_sleeper_players():
+def fetch_sleeper_nba_metadata() -> Dict[str, Any]:
     """
-    Fetch Sleeper's NBA player pool.
+    Thin wrapper over Sleeper NBA players endpoint.
 
-    Endpoint: /players/nba
-    Returns a big dict keyed by player_id.
+    You can treat this as "NBA metadata" for mapping player IDs, positions,
+    teams, etc.
     """
-    url = f"{SLEEPER_BASE_URL}/players/nba"
-    print(f"GET {url}")
-    resp = requests.get(url, timeout=60)
-    resp.raise_for_status()
-    return resp.json()
+    return fetch_sleeper_players()
 
 
-def fetch_sleeper_nba_metadata():
+# -----------------------------
+# BallDontLie NBA game logs (incremental)
+# -----------------------------
+
+def fetch_nba_game_logs_for_date(date_obj: dt.date) -> List[Dict[str, Any]]:
     """
-    Thin wrapper to keep compatibility with update_nba_historical.py.
-    Currently just returns the same structure as fetch_sleeper_players.
+    Fetch all player game logs for a single date via BallDontLie /v1/stats.
+
+    Uses cursor-based pagination as documented by BallDontLie:
+      - per_page up to 100
+      - meta.next_cursor for subsequent pages
     """
-    players = fetch_sleeper_players()
-    return {"players": players}
+    headers = _balldontlie_headers()
+    if not headers:
+        # Already logged missing API key.
+        return []
+
+    date_str = date_obj.isoformat()
+    print(f"Fetching logs for {date_str}")
+
+    url = f"{BALLDONTLIE_BASE}/stats"
+    all_logs: List[Dict[str, Any]] = []
+    cursor: Optional[int] = None
+
+    while True:
+        params: Dict[str, Any] = {
+            "dates[]": date_str,
+            "per_page": 100,
+        }
+        if cursor is not None:
+            params["cursor"] = cursor
+
+        resp = _safe_get(url, params=params, headers=headers)
+        if resp is None:
+            # Could be network error, HTTP error, etc.
+            # If it's HTTP 401 specifically, log once and bail out for the entire date.
+            try:
+                # If we had a response but it raised on .raise_for_status(), _safe_get
+                # would already have printed it. To be extra explicit:
+                if resp is not None and resp.status_code == 401:
+                    print(
+                        "Got 401 from BallDontLie. "
+                        "Make sure BALLDONTLIE_API_KEY is set AND your account tier "
+                        "includes the /stats endpoint (game player stats)."
+                    )
+            except Exception:
+                pass
+            break
+
+        data = resp.json()
+        logs = data.get("data", [])
+        all_logs.extend(logs)
+
+        meta = data.get("meta", {}) or {}
+        cursor = meta.get("next_cursor")
+        if not cursor:
+            break
+
+        # Small pause to be nice to the API
+        time.sleep(0.2)
+
+    print(f"Fetched {len(all_logs)} logs for {date_str}")
+    return all_logs
+
+
+def fetch_nba_game_logs_since(start_date: dt.date,
+                              end_date: Optional[dt.date] = None) -> List[Dict[str, Any]]:
+    """
+    Fetch player game logs from BallDontLie from start_date (inclusive)
+    up to end_date (inclusive, default = today).
+
+    Returns a flat list of BallDontLie stat objects.
+    """
+    if end_date is None:
+        end_date = dt.date.today()
+
+    all_logs: List[Dict[str, Any]] = []
+    cur = start_date
+
+    while cur <= end_date:
+        day_logs = fetch_nba_game_logs_for_date(cur)
+        all_logs.extend(day_logs)
+        cur += dt.timedelta(days=1)
+
+    print(f"Fetched {len(all_logs)} new game logs in total.")
+    return all_logs
+
+
+# -----------------------------
+# NBA schedule (best-effort)
+# -----------------------------
+
+def fetch_nba_schedule(season_year: Optional[int] = None) -> Dict[str, Any]:
+    """
+    Fetch NBA schedule from data.nba.net.
+
+    If SSL issues occur on your VPS, this function will simply log and
+    return an empty dict (so the rest of the pipeline still works).
+    """
+    if season_year is None:
+        today = dt.date.today()
+        season_year = today.year
+
+    url = NBA_SCHEDULE_URL_TEMPLATE.format(season=season_year)
+
+    try:
+        # If this still fails due to SSL on your VPS, we catch it.
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        print(f"Fetched NBA schedule for season {season_year}.")
+        return data
+    except Exception as e:
+        print(f"Failed to fetch NBA schedule: {e}")
+        return {}
 
 
 # -----------------------------
 # ESPN injuries
 # -----------------------------
 
-def fetch_espn_injuries():
+def fetch_espn_injuries() -> Dict[str, Any]:
     """
-    Fetch ESPN injuries JSON raw.
+    Fetch raw ESPN injuries payload.
 
-    We'll parse/normalize it in update_nba_historical.py.
+    We'll keep this simple and return the full JSON. The frontend or
+    update_nba_historical.py can decide how to parse it.
+
+    ESPN's structure can change, so this is safer than overfitting.
     """
-    print(f"GET {ESPN_INJURIES_URL}")
-    try:
-        resp = requests.get(ESPN_INJURIES_URL, timeout=20)
-        resp.raise_for_status()
-    except requests.RequestException as e:
-        print(f"Failed to fetch ESPN injuries: {e}")
+    resp = _safe_get(ESPN_INJURIES_URL)
+    if resp is None:
+        print("Failed to fetch ESPN injuries.")
         return {}
 
-    try:
-        return resp.json()
-    except Exception as e:
-        print(f"Failed to parse ESPN injuries JSON: {e}")
-        return {}
+    data = resp.json()
+    # For logging/debugging only
+    total_items = len(data.get("injuries", [])) if isinstance(data.get("injuries", []), list) else 0
+    print(f"Fetched ESPN injuries payload (top-level 'injuries' count: {total_items}).")
+    return data
