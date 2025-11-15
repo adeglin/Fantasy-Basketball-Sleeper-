@@ -14,17 +14,8 @@ jobs:
       REPO: adeglin/Fantasy-Basketball-Sleeper-
 
     steps:
-      - uses: actions/checkout@v3
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+      - name: Checkout repo
+        uses: actions/checkout@v3
 
       - name: Set up git identity
         run: |
@@ -37,8 +28,18 @@ jobs:
 
       - name: Commit and push updated data
         run: |
+          # Show current status
           git status
+
+          # Remove the GitHub Actions default auth header so our PAT is used instead
+          git config --local --unset-all http.https://github.com/.extraheader || true
+
+          # Point origin at PAT-authenticated URL
           git remote set-url origin https://x-access-token:${GH_PAT}@github.com/${REPO}.git
+
+          # Add and commit the updated JSON
           git add docs/data/nba_historical.json || echo "no file to add"
           git commit -m "Automated data update [skip ci]" || echo "no changes to commit"
+
+          # Push to main using PAT
           git push origin main || echo "no changes pushed"
