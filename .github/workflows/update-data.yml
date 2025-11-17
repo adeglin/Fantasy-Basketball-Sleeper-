@@ -2,51 +2,37 @@ name: Update NBA Data
 
 on:
   schedule:
-    - cron: "0 8 * * *"   # 3 AM Eastern (8 AM UTC)
+    - cron: "0 */6 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
-  update_data:
+  update:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check out repo
+      - name: Checkout repo
         uses: actions/checkout@v3
+        with:
+          token: ${{ secrets.PAT }}
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          else
-            pip install requests pandas
-          fi
+      - name: Install deps
+        run: pip install requests
 
       - name: Run update script
-        run: |
-          python tools/update_nba_historical.py
+        run: python tools/update_nba_historical.py
 
-      - name: Commit updated data
+      - name: Commit and push
         run: |
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
-
-          # Only add the data bundle, not __pycache__ or other junk
           git add docs/data/nba_historical.json
-
-          git status
-
-          git commit -m "Update NBA data" || echo "No changes to commit"
-
-      - name: Push changes
-        run: |
-          # IMPORTANT:
-          # 1. Replace YOUR_PAT_HERE with your actual personal access token.
-          # 2. DO NOT use < > around it.
-          # 3. Leave the rest of the URL exactly as-is.
-          git push https://adeglin:dff1b999-16ba-417a-93ac-c2cdf81de883@github.com/adeglin/Fantasy-Basketball-Sleeper-.git HEAD:main
+          git commit -m "Update NBA data" || echo "No changes"
+          git push
