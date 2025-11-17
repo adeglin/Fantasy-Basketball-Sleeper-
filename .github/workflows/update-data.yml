@@ -58,7 +58,7 @@ jobs:
           # IMPORTANT:
           # Replace REPLACE_WITH_YOUR_PAT with your actual PAT string once.
           # Example: ghp_abc123...
-          git remote set-url origin https://REPLACE_WITH_YOUR_PAT@github.com/adeglin/Fantasy-Basketball-Sleeper-.git
+          git remote set-url origin https://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@github.com/adeglin/Fantasy-Basketball-Sleeper-.git
 
           git push origin main
 
