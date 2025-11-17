@@ -1,128 +1,192 @@
 import requests
+import time
+from datetime import datetime
+from functools import lru_cache
 
-# Hardcoded API key for BallDontLie (NBA data)
-BALLDONTLIE_API_KEY = "dff1b999-16ba-417a-93ac-c2cdf81de883"
-BALLDONTLIE_BASE_URL = "https://api.balldontlie.io/v1"
-# Base URL for Sleeper API (no auth token needed for Sleeper)
-SLEEPER_BASE_URL = "https://api.sleeper.app/v1"
+ESPN_SCHEDULE_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
+ESPN_GAMECAST_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary"
+DOUG_BOX_URL = "https://www.dougstats.com"  # HTML parsing fallback
 
-def fetch_nba_stats_by_date(date_str, player_ids=None):
-    """
-    Fetch all NBA player stats for a given date (YYYY-MM-DD) using the BallDontLie API.
-    Optionally filter by a list of BallDontLie player IDs.
-    Returns a list of stat objects (each includes player, team, game info, and stats).
-    """
-    url = f"{BALLDONTLIE_BASE_URL}/stats?per_page=100&dates[]={date_str}"
-    if player_ids:
-        for pid in player_ids:
-            url += f"&player_ids[]={pid}"
-    headers = {"Authorization": BALLDONTLIE_API_KEY}
-    results = []
-    cursor = None
-    while True:
-        url_with_cursor = url if cursor is None else f"{url}&cursor={cursor}"
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; FantasyBot/1.0)"
+}
+
+
+def safe_get(url, params=None):
+    """Perform GET with retry + timeout."""
+    for _ in range(3):
         try:
-            resp = requests.get(url_with_cursor, headers=headers)
-        except requests.RequestException as e:
-            # If a network error occurs, break out (could log or retry as needed)
-            print(f"Network error fetching stats for {date_str}: {e}")
-            break
-        if resp.status_code != 200:
-            # If API returns an error status, log and break
-            print(f"Failed to fetch stats for {date_str}: {resp.status_code} {resp.text}")
-            break
-        data = resp.json()
-        if "data" not in data:
-            # Unexpected response structure
-            print(f"Unexpected response for {date_str}: {data}")
-            break
-        stats_list = data["data"]
-        if not stats_list:
-            # No stats returned for this date (e.g., no games on this date)
-            break
-        results.extend(stats_list)
-        # Pagination: check if there's more data
-        meta = data.get("meta", {})
-        next_cursor = meta.get("next_cursor")
-        if next_cursor:
-            cursor = next_cursor  # fetch next page of results
-            continue
-        else:
-            break
-    return results
+            resp = requests.get(url, params=params, headers=HEADERS, timeout=15)
+            if resp.status_code == 200:
+                return resp
+        except Exception:
+            time.sleep(1)
+    return None
 
-def get_sleeper_players_map(sport="nba"):
+
+def fetch_espn_games_for_date(date_str):
     """
-    Fetches the Sleeper API players database for the given sport (default NBA).
-    Returns a dictionary mapping Sleeper player IDs to their player information.
-    This is a large call (~5MB data for NBA) and should be done at most once per day.
+    Fetch ESPN scoreboard for a specific date (YYYYMMDD format).
+    Returns list of game IDs.
     """
-    url = f"{SLEEPER_BASE_URL}/players/{sport}"
-    resp = requests.get(url)
-    if resp.status_code != 200:
-        raise Exception(f"Failed to fetch Sleeper players data (status {resp.status_code})")
+    resp = safe_get(ESPN_SCHEDULE_URL, params={"dates": date_str})
+    if not resp:
+        return []
+
+    data = resp.json()
+    events = data.get("events", [])
+    game_ids = [e["id"] for e in events if "id" in e]
+    return game_ids
+
+
+def fetch_espn_gamecast(game_id):
+    """
+    Fetch complete ESPN Gamecast (box score, scoring plays, teams, players).
+    """
+    url = f"{ESPN_GAMECAST_URL}/{game_id}"
+    resp = safe_get(url)
+    if not resp:
+        return None
+
     return resp.json()
 
-def fetch_sleeper_league_metadata(league_id):
+
+def normalize_espn_box(game_json):
     """
-    Fetches metadata for a given Sleeper fantasy league, including league settings and rosters.
-    Returns a dictionary with league info and a list of teams (each team includes roster and owner info).
-    """
-    # Get basic league information
-    league_url = f"{SLEEPER_BASE_URL}/league/{league_id}"
-    resp_league = requests.get(league_url)
-    if resp_league.status_code != 200:
-        raise Exception(f"Error fetching league {league_id}: HTTP {resp_league.status_code}")
-    league_info = resp_league.json()
-
-    # Get all rosters in the league
-    rosters_url = f"{SLEEPER_BASE_URL}/league/{league_id}/rosters"
-    resp_rosters = requests.get(rosters_url)
-    if resp_rosters.status_code != 200:
-        raise Exception(f"Error fetching rosters for league {league_id}: HTTP {resp_rosters.status_code}")
-    rosters = resp_rosters.json()
-
-    # Get all users in the league (to map owners to team names)
-    users_url = f"{SLEEPER_BASE_URL}/league/{league_id}/users"
-    resp_users = requests.get(users_url)
-    if resp_users.status_code != 200:
-        raise Exception(f"Error fetching users for league {league_id}: HTTP {resp_users.status_code}")
-    users = resp_users.json()
-    # Create a map for quick lookup of user info by user_id
-    user_map = {user["user_id"]: user for user in users}
-
-    # Build the list of teams with their rosters and owner info
-    teams = []
-    for roster in rosters:
-        owner_id = roster.get("owner_id")
-        user_info = user_map.get(owner_id, {})
-        # Determine team name: use user-provided team name if available, otherwise fall back to display name or roster ID
-        if "metadata" in user_info and user_info["metadata"].get("team_name"):
-            team_name = user_info["metadata"]["team_name"]
-        else:
-            team_name = user_info.get("display_name") or user_info.get("username") or f"Team {roster.get('roster_id')}"
-        team_data = {
-            "roster_id": roster.get("roster_id"),
-            "owner_id": owner_id,
-            "team_name": team_name,
-            "players": roster.get("players", []),    # list of Sleeper player IDs on this roster
-            "starters": roster.get("starters", []),  # list of starting player IDs for current matchup (if in season)
-            # include optional standings info if available
-            "wins": roster.get("settings", {}).get("wins"),
-            "losses": roster.get("settings", {}).get("losses"),
-            "ties": roster.get("settings", {}).get("ties"),
-            "points_for": roster.get("settings", {}).get("fpts"),
-            "points_against": roster.get("settings", {}).get("fpts_against")
+    Convert ESPN summary → standardized flat boxscore.
+    Output format:
+    {
+        "game_id": ...,
+        "date": ...,
+        "home_team": "...",
+        "away_team": "...",
+        "players": {
+            "player_id": {
+                "team": "...",
+                "stats": {...}
+            }
         }
-        teams.append(team_data)
-
-    # Compile league metadata
-    league_metadata = {
-        "league_id": league_id,
-        "league_name": league_info.get("name"),
-        "season": league_info.get("season"),
-        "status": league_info.get("status"),
-        "total_rosters": league_info.get("total_rosters"),
-        "teams": teams
     }
-    return league_metadata
+    """
+    if not game_json:
+        return None
+
+    header = game_json.get("header", {})
+    competitions = header.get("competitions", [{}])[0]
+
+    home_team = competitions["competitors"][0]["team"]["shortDisplayName"]
+    away_team = competitions["competitors"][1]["team"]["shortDisplayName"]
+    date = header.get("competitions", [{}])[0].get("date", "")
+
+    result = {
+        "game_id": header.get("id"),
+        "date": date[:10],
+        "home_team": home_team,
+        "away_team": away_team,
+        "players": {}
+    }
+
+    # Extract player box score
+    box = game_json.get("boxscore", {})
+    for team in box.get("players", []):
+        team_name = team.get("team", {}).get("shortDisplayName")
+        for player in team.get("statistics", []):
+            pid = player.get("athlete", {}).get("id")
+            if not pid:
+                continue
+
+            stats = {}
+            for cat in player.get("stats", []):
+                parts = cat.split(":")
+                if len(parts) == 2:
+                    key = parts[0].strip()
+                    val = parts[1].strip()
+                    stats[key] = val
+
+            result["players"][pid] = {
+                "team": team_name,
+                "stats": stats
+            }
+
+    return result
+
+
+###########################################
+# DOUGSTATS FALLBACK PARSER (LIGHT)
+###########################################
+
+def fetch_doug_box(date_str):
+    """
+    Fetch DougStats HTML box score for a given date.
+    We only parse minimal data (points, rebounds, assists).
+    """
+    yyyy, mm, dd = date_str[:4], date_str[4:6], date_str[6:]
+    url = f"{DOUG_BOX_URL}/{yyyy}-{mm}-{dd}.html"
+
+    resp = safe_get(url)
+    if not resp:
+        return None
+
+    # WE KEEP THIS SIMPLE: extract <pre> block
+    html = resp.text
+    if "<pre>" not in html:
+        return None
+
+    # Minimal parse: name + PTS + TRB + AST
+    lines = html.split("\n")
+    players = {}
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        name = parts[0]
+        try:
+            pts = int(parts[-3])
+            reb = int(parts[-2])
+            ast = int(parts[-1])
+        except:
+            continue
+
+        players[name] = {
+            "team": None,
+            "stats": {
+                "PTS": pts,
+                "REB": reb,
+                "AST": ast
+            }
+        }
+
+    return players if players else None
+
+
+###########################################
+# MASTER FETCH FUNCTION
+###########################################
+
+def fetch_games_for_date(date_str):
+    """
+    Returns standardized boxscores (ESPN → normalized; Doug fallback if needed).
+    """
+    game_ids = fetch_espn_games_for_date(date_str)
+    results = []
+
+    for gid in game_ids:
+        raw = fetch_espn_gamecast(gid)
+        normalized = normalize_espn_box(raw)
+
+        if normalized:
+            results.append(normalized)
+            continue
+
+        # fallback: DougStats
+        doug = fetch_doug_box(date_str)
+        if doug:
+            results.append({
+                "game_id": f"DOUG-{date_str}",
+                "date": date_str,
+                "home_team": None,
+                "away_team": None,
+                "players": doug
+            })
+
+    return results
