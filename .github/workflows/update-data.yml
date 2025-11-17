@@ -1,75 +1,66 @@
-name: Update NBA Data
+name: Update NBA data
 
 on:
   schedule:
-    - cron: "0 */6 * * *"   # every 6 hours
+    # Every day at 8:00 UTC (adjust as you like)
+    - cron: "0 8 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
-  update:
+  update-data:
     runs-on: ubuntu-latest
 
     steps:
-      # -----------------------------------------------------------
-      # 1. Checkout repository with correct token (FIXED)
-      # -----------------------------------------------------------
       - name: Checkout repo
         uses: actions/checkout@v3
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          fetch-depth: 0
 
-      # -----------------------------------------------------------
-      # 2. Set up Python
-      # -----------------------------------------------------------
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # -----------------------------------------------------------
-      # 3. Install Python requirements
-      # -----------------------------------------------------------
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: |
-          pip install requests python-dateutil
+          python -m pip install --upgrade pip
+          pip install nba_api requests
 
-      # -----------------------------------------------------------
-      # 4. Run the updater script
-      # -----------------------------------------------------------
-      - name: Run update script
-        env:
-          ESPN_SCOREBOARD_URL: "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
-          ESPN_BOXSCORE_URL: "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary"
+      - name: Update NBA historical data
         run: |
           python tools/update_nba_historical.py
 
-      # -----------------------------------------------------------
-      # 5. Git status output (for debugging)
-      # -----------------------------------------------------------
-      - name: Print git status
-        run: |
-          echo "========== GIT STATUS =========="
-          git status
-          echo "================================"
-
-      # -----------------------------------------------------------
-      # 6. Configure git to allow commit
-      # -----------------------------------------------------------
-      - name: Configure git user
-        run: |
-          git config user.name "GitHub Actions"
-          git config user.email "noreply@github.com"
-
-      # -----------------------------------------------------------
-      # 7. Commit and push only if changed
-      # -----------------------------------------------------------
       - name: Commit and push changes
+        env:
+          GIT_AUTHOR_NAME: "GitHub Actions"
+          GIT_AUTHOR_EMAIL: "actions@github.com"
+          GIT_COMMITTER_NAME: "GitHub Actions"
+          GIT_COMMITTER_EMAIL: "actions@github.com"
         run: |
+          echo "========== GIT STATUS BEFORE =========="
+          git status
+
+          # Stage only the data file (and fetch_data cache if any)
           git add docs/data/nba_historical.json || true
+
+          # If nothing was actually staged, exit cleanly
           if git diff --cached --quiet; then
-            echo "No changes to commit."
-          else
-            git commit -m "Update NBA data"
-            git push https://x-access-token:${{ secrets.GH_PAT }}@github.com/${{ github.repository }}.git
+            echo "No changes to commit"
+            exit 0
           fi
+
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+
+          git commit -m "Update NBA data" || exit 0
+
+          # IMPORTANT:
+          # Replace REPLACE_WITH_YOUR_PAT with your actual PAT string once.
+          # Example: ghp_abc123...
+          git remote set-url origin https://REPLACE_WITH_YOUR_PAT@github.com/adeglin/Fantasy-Basketball-Sleeper-.git
+
+          git push origin main
+
+          echo "========== GIT STATUS AFTER =========="
+          git status
