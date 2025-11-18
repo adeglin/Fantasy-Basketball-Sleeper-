@@ -1,60 +1,37 @@
 // ============ BASIC HELPERS ============
 
 async function loadDataBundle() {
-  // Try to load both the old Sleeper bundle and the NBA historical file
-  const [sleeperResp, nbaResp] = await Promise.allSettled([
-    fetch("./data/data_bundle.json", { cache: "no-cache" }),
-    fetch("./data/nba_historical.json", { cache: "no-cache" }),
-  ]);
+  // We prefer the new merged bundle: nba_historical.json
+  // but fall back to data_bundle.json if needed.
+  const candidates = [
+    "./data/nba_historical.json",
+    "./data/data_bundle.json",
+  ];
 
-  let bundle = {};
+  let lastError = null;
 
-  // 1) Base bundle from data_bundle.json (Sleeper + maybe meta)
-  if (sleeperResp.status === "fulfilled" && sleeperResp.value.ok) {
+  for (const path of candidates) {
     try {
-      bundle = await sleeperResp.value.json();
-    } catch (e) {
-      console.error("Error parsing data_bundle.json:", e);
+      const res = await fetch(path, { cache: "no-cache" });
+      if (!res.ok) {
+        console.warn(`Failed to load ${path}: HTTP ${res.status}`);
+        continue;
+      }
+      const json = await res.json();
+      const seasonsCount = json?.nba?.seasons
+        ? Object.keys(json.nba.seasons).length
+        : 0;
+      console.log(
+        `Loaded bundle from ${path}; seasons in nba.seasons = ${seasonsCount}`
+      );
+      return json;
+    } catch (err) {
+      console.warn(`Error loading ${path}:`, err);
+      lastError = err;
     }
   }
 
-  // 2) Merge in NBA data + fresher meta from nba_historical.json
-  if (nbaResp.status === "fulfilled" && nbaResp.value.ok) {
-    try {
-      const nbaJson = await nbaResp.value.json();
-
-      // If this file already has `nba`, use that
-      if (nbaJson.nba) {
-        bundle.nba = nbaJson.nba;
-      } else if (nbaJson.seasons) {
-        // or if it has seasons at the top level, wrap them
-        bundle.nba = { seasons: nbaJson.seasons };
-      }
-
-      // Prefer meta from nba_historical.json if present
-      if (nbaJson.meta) {
-        bundle.meta = nbaJson.meta;
-      }
-
-      // If this file also has Sleeper data and we don't already have it, use it
-      if (nbaJson.sleeper && !bundle.sleeper) {
-        bundle.sleeper = nbaJson.sleeper;
-      }
-    } catch (e) {
-      console.error("Error parsing nba_historical.json:", e);
-    }
-  }
-
-  if (!bundle.meta) {
-    throw new Error("Failed to load data bundle meta from either JSON file");
-  }
-
-  console.log("Loaded data bundle:", {
-    meta: bundle.meta,
-    seasons: bundle.nba && Object.keys(bundle.nba.seasons || {}),
-  });
-
-  return bundle;
+  throw lastError || new Error("Could not load any data bundle JSON");
 }
 
 function esc(s) {
@@ -104,17 +81,28 @@ function renderOverviewPlayers(bundle) {
   const seasonBlock = bundle.nba?.seasons?.[currentSeason];
   const container = document.getElementById("overview-players-table");
 
-  if (!seasonBlock || !seasonBlock.season_stats || !seasonBlock.season_stats.length) {
+  if (
+    !seasonBlock ||
+    !seasonBlock.season_stats ||
+    !seasonBlock.season_stats.length
+  ) {
     container.textContent = "No current season data available.";
-    console.warn("No season_stats found for", currentSeason, bundle.nba?.seasons);
+    console.warn(
+      "No season_stats found for",
+      currentSeason,
+      bundle.nba?.seasons
+    );
     return;
   }
 
   const stats = seasonBlock.season_stats;
-  const sorted = [...stats].sort((a, b) => (b.PTS ?? 0) - (a.PTS ?? 0)).slice(0, 150);
+  const sorted = [...stats]
+    .sort((a, b) => (b.PTS ?? 0) - (a.PTS ?? 0))
+    .slice(0, 150);
 
   let html = "<table><thead><tr>";
-  html += "<th>Player</th><th>Team</th><th>GP</th><th>MIN</th><th>PTS</th><th>REB</th><th>AST</th>";
+  html +=
+    "<th>Player</th><th>Team</th><th>GP</th><th>MIN</th><th>PTS</th><th>REB</th><th>AST</th>";
   html += "</tr></thead><tbody>";
 
   for (const row of sorted) {
@@ -180,7 +168,8 @@ function renderRostersTable(bundle) {
     });
 
     let html = "<table><thead><tr>";
-    html += "<th>Owner</th><th>Roster</th><th>Player</th><th>Team</th><th>Pos</th><th>Fantasy Pos</th><th>Injury</th>";
+    html +=
+      "<th>Owner</th><th>Roster</th><th>Player</th><th>Team</th><th>Pos</th><th>Fantasy Pos</th><th>Injury</th>";
     html += "</tr></thead><tbody>";
 
     for (const r of rows) {
@@ -193,11 +182,15 @@ function renderRostersTable(bundle) {
       const injDisplay = inj ? `${inj}${injNotes}` : "";
 
       html += "<tr>";
-      html += `<td><span class="pill pill-owner">${esc(r.display_name || "Unknown")}</span></td>`;
+      html += `<td><span class="pill pill-owner">${esc(
+        r.display_name || "Unknown"
+      )}</span></td>`;
       html += `<td>${esc(r.roster_id)}</td>`;
       html += `<td>${esc(p.full_name || pid)}</td>`;
       html += `<td>${esc(p.team || "")}</td>`;
-      html += `<td>${pos ? `<span class="pill pill-pos">${esc(pos)}</span>` : ""}</td>`;
+      html += `${
+        pos ? `<td><span class="pill pill-pos">${esc(pos)}</span></td>` : "<td></td>"
+      }`;
       html += `<td>${esc(fpos)}</td>`;
       html += `<td>${esc(injDisplay)}</td>`;
       html += "</tr>";
@@ -243,16 +236,13 @@ function renderFreeAgentsTable(bundle) {
   let candidateFA;
 
   if (hasSeasonStats) {
-    // Preferred: active current-season NBA players with current-season stats, not rostered
+    // Preferred: active current-season NBA players with stats, not rostered
     const stats = seasonBlock.season_stats;
-    const statsNameSet = new Set(
-      stats.map((s) => normName(s.PLAYER_NAME))
-    );
+    const statsNameSet = new Set(stats.map((s) => normName(s.PLAYER_NAME)));
 
     candidateFA = players.filter((p) => {
       const id = String(p.sleeper_player_id || "");
       if (!id || owned.has(id)) return false;
-
       if (!p.team) return false;
       if (p.active === false) return false;
 
@@ -266,11 +256,9 @@ function renderFreeAgentsTable(bundle) {
     candidateFA = players.filter((p) => {
       const id = String(p.sleeper_player_id || "");
       if (!id || owned.has(id)) return false;
-
-      if (!p.team) return false;           // must be on an NBA team
+      if (!p.team) return false; // must be on an NBA team
       if (p.status === "RET") return false;
       if (p.active === false) return false;
-
       return true;
     });
   }
@@ -303,7 +291,8 @@ function renderFreeAgentsTable(bundle) {
     );
 
     let html = "<table><thead><tr>";
-    html += "<th>Player</th><th>Team</th><th>Pos</th><th>Fantasy Pos</th><th>Status</th><th>Injury</th>";
+    html +=
+      "<th>Player</th><th>Team</th><th>Pos</th><th>Fantasy Pos</th><th>Status</th><th>Injury</th>";
     html += "</tr></thead><tbody>";
 
     for (const p of rows) {
@@ -316,7 +305,9 @@ function renderFreeAgentsTable(bundle) {
       html += "<tr>";
       html += `<td>${esc(p.full_name || p.sleeper_player_id)}</td>`;
       html += `<td>${esc(p.team || "")}</td>`;
-      html += `<td>${pos ? `<span class="pill pill-pos">${esc(pos)}</span>` : ""}</td>`;
+      html += `${
+        pos ? `<td><span class="pill pill-pos">${esc(pos)}</span></td>` : "<td></td>"
+      }`;
       html += `<td>${esc(fpos)}</td>`;
       html += `<td>${esc(status)}</td>`;
       html += `<td>${esc(inj + (injNotes ? " — " + injNotes : ""))}</td>`;
@@ -363,18 +354,19 @@ function setupGameLogs(bundle) {
     const seasonBlock = seasonsObj[season];
 
     if (!seasonBlock) {
-      container.textContent = "No logs for selected season (missing season block).";
+      container.textContent =
+        "No logs for selected season (missing season block).";
       return;
     }
 
     const logs = seasonBlock.game_logs || [];
     if (!logs.length) {
-      container.textContent = "No logs for selected season (game_logs is empty).";
+      container.textContent =
+        "No logs for selected season (game_logs is empty).";
       console.warn("game_logs empty for season", season, seasonBlock);
       return;
     }
 
-    // Sort by date desc
     const logsCopy = [...logs].sort((a, b) => {
       const da = new Date(a.GAME_DATE);
       const db = new Date(b.GAME_DATE);
@@ -390,11 +382,14 @@ function setupGameLogs(bundle) {
     let recentThreshold = null;
     if (logsCopy.length) {
       const mostRecentDate = new Date(logsCopy[0].GAME_DATE);
-      recentThreshold = new Date(mostRecentDate.getTime() - 3 * 24 * 60 * 60 * 1000);
+      recentThreshold = new Date(
+        mostRecentDate.getTime() - 3 * 24 * 60 * 60 * 1000
+      );
     }
 
     let html = "<table><thead><tr>";
-    html += "<th>Date</th><th>Player</th><th>Team</th><th>Matchup</th><th>MIN</th><th>PTS</th><th>REB</th><th>AST</th>";
+    html +=
+      "<th>Date</th><th>Player</th><th>Team</th><th>Matchup</th><th>MIN</th><th>PTS</th><th>REB</th><th>AST</th>";
     html += "</tr></thead><tbody>";
 
     for (const g of rows) {
@@ -439,7 +434,10 @@ function renderTransactions(bundle) {
   const playerMap = new Map();
   for (const p of players) {
     if (!p.sleeper_player_id) continue;
-    playerMap.set(String(p.sleeper_player_id), p.full_name || p.sleeper_player_id);
+    playerMap.set(
+      String(p.sleeper_player_id),
+      p.full_name || p.sleeper_player_id
+    );
   }
 
   const userMap = new Map();
@@ -467,7 +465,8 @@ function renderTransactions(bundle) {
   });
 
   let html = "<table><thead><tr>";
-  html += "<th>Week</th><th>Type</th><th>Status</th><th>Creator</th><th>Adds</th><th>Drops</th><th>Waiver Bid</th>";
+  html +=
+    "<th>Week</th><th>Type</th><th>Status</th><th>Creator</th><th>Adds</th><th>Drops</th><th>Waiver Bid</th>";
   html += "</tr></thead><tbody>";
 
   for (const t of rows) {
@@ -494,9 +493,12 @@ async function fetchLiveInjuries() {
   container.textContent = "Loading live injuries...";
 
   try {
-    const res = await fetch("https://site.api.espn.com/apis/site/v2/sports/basketball/nba/injuries", {
-      cache: "no-cache",
-    });
+    const res = await fetch(
+      "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/injuries",
+      {
+        cache: "no-cache",
+      }
+    );
     if (!res.ok) {
       throw new Error(`HTTP ${res.status}`);
     }
@@ -545,11 +547,14 @@ async function fetchLiveInjuries() {
     });
 
     let html = "<table><thead><tr>";
-    html += "<th>Player</th><th>Team</th><th>Status</th><th>Injury</th><th>Detail</th><th>Return</th>";
+    html +=
+      "<th>Player</th><th>Team</th><th>Status</th><th>Injury</th><th>Detail</th><th>Return</th>";
     html += "</tr></thead><tbody>";
 
     for (const inj of injuries) {
-      const statusPill = `<span class="pill pill-inj">${esc(inj.status)}</span>`;
+      const statusPill = `<span class="pill pill-inj">${esc(
+        inj.status
+      )}</span>`;
       html += "<tr>";
       html += `<td>${esc(inj.player)}</td>`;
       html += `<td>${esc(inj.team)}</td>`;
