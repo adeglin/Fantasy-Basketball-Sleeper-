@@ -361,7 +361,7 @@ function setupGameLogs(bundle) {
       html += `<td>${esc(g.PTS)}</td>`;
       html += `<td>${esc(g.REB)}</td>`;
       html += `<td>${esc(g.AST)}</td>`;
-      html += "</tr>`;
+      html += "</tr>";
     }
 
     html += "</tbody></table>";
@@ -431,7 +431,7 @@ function renderTransactions(bundle) {
     html += `<td>${esc(formatAddsDrops(t.adds))}</td>`;
     html += `<td>${esc(formatAddsDrops(t.drops))}</td>`;
     html += `<td>${esc(t.waiver_bid ?? "")}</td>`;
-    html += "</tr>`;
+    html += "</tr>";
   }
 
   html += "</tbody></table>";
@@ -508,7 +508,7 @@ async function fetchLiveInjuries() {
       html += `<td>${esc(inj.type)}</td>`;
       html += `<td>${esc(inj.detail)}</td>`;
       html += `<td>${esc(inj.returnDate)}</td>`;
-      html += "</tr>`;
+      html += "</tr>";
     }
 
     html += "</tbody></table>";
