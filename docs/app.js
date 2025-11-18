@@ -1,11 +1,60 @@
 // ============ BASIC HELPERS ============
 
 async function loadDataBundle() {
-  const res = await fetch("./data/data_bundle.json", { cache: "no-cache" });
-  if (!res.ok) {
-    throw new Error("Failed to load data_bundle.json");
+  // Try to load both the old Sleeper bundle and the NBA historical file
+  const [sleeperResp, nbaResp] = await Promise.allSettled([
+    fetch("./data/data_bundle.json", { cache: "no-cache" }),
+    fetch("./data/nba_historical.json", { cache: "no-cache" }),
+  ]);
+
+  let bundle = {};
+
+  // 1) Base bundle from data_bundle.json (Sleeper + maybe meta)
+  if (sleeperResp.status === "fulfilled" && sleeperResp.value.ok) {
+    try {
+      bundle = await sleeperResp.value.json();
+    } catch (e) {
+      console.error("Error parsing data_bundle.json:", e);
+    }
   }
-  return res.json();
+
+  // 2) Merge in NBA data + fresher meta from nba_historical.json
+  if (nbaResp.status === "fulfilled" && nbaResp.value.ok) {
+    try {
+      const nbaJson = await nbaResp.value.json();
+
+      // If this file already has `nba`, use that
+      if (nbaJson.nba) {
+        bundle.nba = nbaJson.nba;
+      } else if (nbaJson.seasons) {
+        // or if it has seasons at the top level, wrap them
+        bundle.nba = { seasons: nbaJson.seasons };
+      }
+
+      // Prefer meta from nba_historical.json if present
+      if (nbaJson.meta) {
+        bundle.meta = nbaJson.meta;
+      }
+
+      // If this file also has Sleeper data and we don't already have it, use it
+      if (nbaJson.sleeper && !bundle.sleeper) {
+        bundle.sleeper = nbaJson.sleeper;
+      }
+    } catch (e) {
+      console.error("Error parsing nba_historical.json:", e);
+    }
+  }
+
+  if (!bundle.meta) {
+    throw new Error("Failed to load data bundle meta from either JSON file");
+  }
+
+  console.log("Loaded data bundle:", {
+    meta: bundle.meta,
+    seasons: bundle.nba && Object.keys(bundle.nba.seasons || {}),
+  });
+
+  return bundle;
 }
 
 function esc(s) {
@@ -16,6 +65,7 @@ function esc(s) {
     .replace(/>/g, "&gt;");
 }
 
+// simple name normalizer for joins (strip accents, lowercase, collapse spaces)
 function normName(s) {
   if (!s) return "";
   return s
@@ -41,63 +91,6 @@ function setupTabs() {
   });
 }
 
-// ============ BUILD nba.seasons + season_stats FROM RAW LOGS ============
-
-function normalizeNBA(bundle) {
-  const nba = bundle.nba || {};
-  const logs = nba.game_logs || nba.logs || [];
-
-  const seasons = {};
-  const agg = {}; // per-season, per-player aggregation
-
-  for (const g of logs) {
-    const season = g.SEASON || g.season;
-    if (!season) continue;
-
-    // ensure season block exists
-    if (!seasons[season]) {
-      seasons[season] = {
-        season,
-        game_logs: [],
-        season_stats: []
-      };
-      agg[season] = {};
-    }
-
-    seasons[season].game_logs.push(g);
-
-    const name = g.PLAYER_NAME;
-    if (!name) continue;
-    if (!agg[season][name]) {
-      agg[season][name] = {
-        PLAYER_NAME: name,
-        TEAM_ABBREVIATION: g.TEAM_ABBREVIATION || "",
-        GP: 0,
-        MIN: 0,
-        PTS: 0,
-        REB: 0,
-        AST: 0
-      };
-    }
-
-    // aggregate
-    agg[season][name].GP += 1;
-    agg[season][name].MIN += Number(g.MIN || 0);
-    agg[season][name].PTS += Number(g.PTS || 0);
-    agg[season][name].REB += Number(g.REB || 0);
-    agg[season][name].AST += Number(g.AST || 0);
-  }
-
-  // attach season_stats arrays
-  for (const season of Object.keys(seasons)) {
-    const arr = Object.values(agg[season]);
-    seasons[season].season_stats = arr;
-  }
-
-  // replace bundle.nba.seasons
-  bundle.nba.seasons = seasons;
-}
-
 // ============ META / OVERVIEW ============
 
 function renderMeta(meta, leagueName) {
@@ -111,8 +104,9 @@ function renderOverviewPlayers(bundle) {
   const seasonBlock = bundle.nba?.seasons?.[currentSeason];
   const container = document.getElementById("overview-players-table");
 
-  if (!seasonBlock || !seasonBlock.season_stats?.length) {
+  if (!seasonBlock || !seasonBlock.season_stats || !seasonBlock.season_stats.length) {
     container.textContent = "No current season data available.";
+    console.warn("No season_stats found for", currentSeason, bundle.nba?.seasons);
     return;
   }
 
@@ -174,7 +168,8 @@ function renderRostersTable(bundle) {
     if (playerFilter) {
       rows = rows.filter((r) => {
         const p = playerMap.get(String(r.sleeper_player_id)) || {};
-        return (p.full_name || "").toLowerCase().includes(playerFilter);
+        const fullName = (p.full_name || "").toLowerCase();
+        return fullName.includes(playerFilter);
       });
     }
 
@@ -191,7 +186,6 @@ function renderRostersTable(bundle) {
     for (const r of rows) {
       const pid = String(r.sleeper_player_id);
       const p = playerMap.get(pid) || {};
-
       const pos = p.position || "";
       const fpos = (p.fantasy_positions || []).join(", ");
       const inj = p.injury_status ? `${p.injury_status}` : "";
@@ -199,7 +193,7 @@ function renderRostersTable(bundle) {
       const injDisplay = inj ? `${inj}${injNotes}` : "";
 
       html += "<tr>";
-      html += `<td><span class="pill pill-owner">${esc(r.display_name)}</span></td>`;
+      html += `<td><span class="pill pill-owner">${esc(r.display_name || "Unknown")}</span></td>`;
       html += `<td>${esc(r.roster_id)}</td>`;
       html += `<td>${esc(p.full_name || pid)}</td>`;
       html += `<td>${esc(p.team || "")}</td>`;
@@ -215,10 +209,11 @@ function renderRostersTable(bundle) {
 
   ownerFilterInput.addEventListener("input", doRender);
   playerFilterInput.addEventListener("input", doRender);
+
   doRender();
 }
 
-// ============ FREE AGENTS ============
+// ============ FREE AGENTS (ACTIVE 2025–26 OR FALLBACK) ============
 
 function renderFreeAgentsTable(bundle) {
   const container = document.getElementById("fa-table");
@@ -233,15 +228,26 @@ function renderFreeAgentsTable(bundle) {
   const currentSeason = bundle.meta.current_season;
   const seasonBlock = bundle.nba?.seasons?.[currentSeason];
   const hasSeasonStats =
-    seasonBlock && Array.isArray(seasonBlock.season_stats) && seasonBlock.season_stats.length > 0;
+    seasonBlock &&
+    Array.isArray(seasonBlock.season_stats) &&
+    seasonBlock.season_stats.length > 0;
 
-  const owned = new Set(rostersPlayers.map(r => String(r.sleeper_player_id || "")));
+  // Which players are already owned in the league
+  const owned = new Set();
+  for (const r of rostersPlayers) {
+    if (r.sleeper_player_id != null) {
+      owned.add(String(r.sleeper_player_id));
+    }
+  }
 
   let candidateFA;
 
   if (hasSeasonStats) {
+    // Preferred: active current-season NBA players with current-season stats, not rostered
     const stats = seasonBlock.season_stats;
-    const statsNameSet = new Set(stats.map((s) => normName(s.PLAYER_NAME)));
+    const statsNameSet = new Set(
+      stats.map((s) => normName(s.PLAYER_NAME))
+    );
 
     candidateFA = players.filter((p) => {
       const id = String(p.sleeper_player_id || "");
@@ -251,14 +257,17 @@ function renderFreeAgentsTable(bundle) {
       if (p.active === false) return false;
 
       const nm = normName(p.full_name);
-      return statsNameSet.has(nm);
+      if (!statsNameSet.has(nm)) return false;
+
+      return true;
     });
   } else {
+    // Fallback: no NBA stats available – use Sleeper only
     candidateFA = players.filter((p) => {
       const id = String(p.sleeper_player_id || "");
       if (!id || owned.has(id)) return false;
 
-      if (!p.team) return false;
+      if (!p.team) return false;           // must be on an NBA team
       if (p.status === "RET") return false;
       if (p.active === false) return false;
 
@@ -320,10 +329,11 @@ function renderFreeAgentsTable(bundle) {
 
   filterInput.addEventListener("input", doRender);
   posSelect.addEventListener("change", doRender);
+
   doRender();
 }
 
-// ============ GAME LOGS ============
+// ============ GAME LOGS / HISTORICAL BOX SCORES ============
 
 function setupGameLogs(bundle) {
   const seasonSelect = document.getElementById("gamelogs-season-select");
@@ -334,6 +344,7 @@ function setupGameLogs(bundle) {
   const seasons = Object.keys(seasonsObj);
   if (!seasons.length) {
     container.textContent = "No game logs available (nba.seasons is empty).";
+    console.warn("nba.seasons is empty in bundle", bundle.nba);
     return;
   }
 
@@ -352,19 +363,23 @@ function setupGameLogs(bundle) {
     const seasonBlock = seasonsObj[season];
 
     if (!seasonBlock) {
-      container.textContent = "No logs for selected season.";
+      container.textContent = "No logs for selected season (missing season block).";
       return;
     }
 
     const logs = seasonBlock.game_logs || [];
     if (!logs.length) {
-      container.textContent = "No logs for selected season (empty).";
+      container.textContent = "No logs for selected season (game_logs is empty).";
+      console.warn("game_logs empty for season", season, seasonBlock);
       return;
     }
 
-    const logsCopy = [...logs].sort((a, b) =>
-      new Date(b.GAME_DATE) - new Date(a.GAME_DATE)
-    );
+    // Sort by date desc
+    const logsCopy = [...logs].sort((a, b) => {
+      const da = new Date(a.GAME_DATE);
+      const db = new Date(b.GAME_DATE);
+      return db - da;
+    });
 
     const filtered = logsCopy.filter((g) =>
       (g.PLAYER_NAME || "").toLowerCase().includes(playerFilter)
@@ -375,7 +390,7 @@ function setupGameLogs(bundle) {
     let recentThreshold = null;
     if (logsCopy.length) {
       const mostRecentDate = new Date(logsCopy[0].GAME_DATE);
-      recentThreshold = new Date(mostRecentDate - 3 * 86400000);
+      recentThreshold = new Date(mostRecentDate.getTime() - 3 * 24 * 60 * 60 * 1000);
     }
 
     let html = "<table><thead><tr>";
@@ -404,10 +419,11 @@ function setupGameLogs(bundle) {
 
   seasonSelect.addEventListener("change", doRender);
   playerFilterInput.addEventListener("input", doRender);
+
   doRender();
 }
 
-// ============ TRANSACTIONS ============
+// ============ TRANSACTIONS (WITH OWNER) ============
 
 function renderTransactions(bundle) {
   const container = document.getElementById("transactions-table");
@@ -433,14 +449,21 @@ function renderTransactions(bundle) {
 
   function formatAddsDrops(obj) {
     if (!obj) return "";
-    return Object.keys(obj)
-      .map((pid) => playerMap.get(String(pid)) || pid)
-      .join(", ");
+    const names = [];
+    for (const pid of Object.keys(obj)) {
+      const name = playerMap.get(String(pid)) || pid;
+      names.push(name);
+    }
+    return names.join(", ");
   }
 
   const rows = [...txs].sort((a, b) => {
-    if (b.week !== a.week) return b.week - a.week;
-    return (b.created || 0) - (a.created || 0);
+    const aw = a.week || 0;
+    const bw = b.week || 0;
+    if (bw !== aw) return bw - aw;
+    const at = a.created || 0;
+    const bt = b.created || 0;
+    return bt - at;
   });
 
   let html = "<table><thead><tr>";
@@ -449,7 +472,6 @@ function renderTransactions(bundle) {
 
   for (const t of rows) {
     const creatorName = userMap.get(String(t.creator)) || "";
-
     html += "<tr>";
     html += `<td>${esc(t.week)}</td>`;
     html += `<td>${esc(t.type)}</td>`;
@@ -465,7 +487,7 @@ function renderTransactions(bundle) {
   container.innerHTML = html;
 }
 
-// ============ LIVE INJURIES ============
+// ============ LIVE INJURIES (ESPN) ============
 
 async function fetchLiveInjuries() {
   const container = document.getElementById("injuries-table");
@@ -475,34 +497,38 @@ async function fetchLiveInjuries() {
     const res = await fetch("https://site.api.espn.com/apis/site/v2/sports/basketball/nba/injuries", {
       cache: "no-cache",
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
     const data = await res.json();
-    const injuries = [];
 
+    const injuries = [];
     for (const team of data.injuries || []) {
-      const tObj = team.team || team;
-      const abbr =
-        tObj.abbreviation ||
-        tObj.shortName ||
-        tObj.name ||
-        tObj.displayName ||
+      const teamObj = team.team || team;
+      const teamAbbr =
+        teamObj.abbreviation ||
+        teamObj.shortName ||
+        teamObj.name ||
+        teamObj.displayName ||
         "N/A";
 
-      for (const inj of team.injuries || []) {
-        const details = inj.details || {};
-        let type = inj.type;
-        if (typeof type === "object") {
+      for (const injury of team.injuries || []) {
+        const details = injury.details || {};
+        let type = injury.type;
+        if (typeof type === "object" && type !== null) {
           type = type.text || type.description || type.id || "";
         }
+        const status = injury.status || "";
+        const detail = details.detail || details.description || "";
+        const returnDate = details.returnDate || details.returnDateText || "";
 
         injuries.push({
-          player: inj.athlete?.displayName || "N/A",
-          team: abbr,
-          status: inj.status || "",
+          player: injury.athlete?.displayName || "N/A",
+          team: teamAbbr,
+          status,
           type: type || "",
-          detail: details.detail || details.description || "",
-          returnDate: details.returnDate || details.returnDateText || ""
+          detail,
+          returnDate,
         });
       }
     }
@@ -523,10 +549,11 @@ async function fetchLiveInjuries() {
     html += "</tr></thead><tbody>";
 
     for (const inj of injuries) {
+      const statusPill = `<span class="pill pill-inj">${esc(inj.status)}</span>`;
       html += "<tr>";
       html += `<td>${esc(inj.player)}</td>`;
       html += `<td>${esc(inj.team)}</td>`;
-      html += `<td><span class="pill pill-inj">${esc(inj.status)}</span></td>`;
+      html += `<td>${statusPill}</td>`;
       html += `<td>${esc(inj.type)}</td>`;
       html += `<td>${esc(inj.detail)}</td>`;
       html += `<td>${esc(inj.returnDate)}</td>`;
@@ -535,10 +562,10 @@ async function fetchLiveInjuries() {
 
     html += "</tbody></table>";
     container.innerHTML = html;
-
   } catch (err) {
-    console.error("ESPN injuries error:", err);
-    container.textContent = "Could not load live injuries (CORS issue or ESPN offline).";
+    console.error("Error fetching live injuries:", err);
+    container.textContent =
+      "Could not load live injuries. ESPN may be blocking cross-origin requests; later we can add a backend proxy if needed.";
   }
 }
 
@@ -556,9 +583,6 @@ async function init() {
     return;
   }
 
-  // Build nba.seasons + season_stats automatically
-  normalizeNBA(bundle);
-
   const leagueName = bundle.sleeper?.league?.name || "";
   renderMeta(bundle.meta, leagueName);
   renderOverviewPlayers(bundle);
@@ -567,6 +591,7 @@ async function init() {
   setupGameLogs(bundle);
   renderTransactions(bundle);
 
+  // Live injuries are always pulled fresh
   fetchLiveInjuries();
 }
 
