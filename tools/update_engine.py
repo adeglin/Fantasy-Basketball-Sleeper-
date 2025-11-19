@@ -150,8 +150,57 @@ def run_update(
     if sleeper_league_id:
         print("[ENGINE] Fetching Sleeper league data...")
         try:
-            sleeper_data = fetch_sleeper_league_data(sleeper_league_id)
-            bundle["sleeper"] = sleeper_data
+            # Raw Sleeper pieces
+            league = fetch_sleeper_league()
+            users = fetch_sleeper_users()
+            rosters = fetch_sleeper_rosters()
+            transactions = fetch_sleeper_transactions()
+            players_raw = fetch_sleeper_players()
+
+            # Convert big players dict -> list, and attach sleeper_player_id
+            players_list = []
+            for pid, pdata in players_raw.items():
+                if not isinstance(pdata, dict):
+                    continue
+                pdata = dict(pdata)
+                pdata["sleeper_player_id"] = pid
+                players_list.append(pdata)
+
+            # Build normalized roster-player rows with owner display name
+            user_by_id = {}
+            for u in users:
+                uid = str(u.get("user_id"))
+                if not uid:
+                    continue
+                user_by_id[uid] = u
+
+            rosters_players = []
+            for r in rosters:
+                owner_id = str(r.get("owner_id"))
+                owner = user_by_id.get(owner_id, {})
+                display_name = (
+                    owner.get("display_name")
+                    or owner.get("metadata", {}).get("team_name")
+                    or ""
+                )
+                for pid in (r.get("players") or []):
+                    rosters_players.append(
+                        {
+                            "roster_id": r.get("roster_id"),
+                            "owner_id": owner_id,
+                            "display_name": display_name,
+                            "sleeper_player_id": pid,
+                        }
+                    )
+
+            bundle["sleeper"] = {
+                "league": league,
+                "users": users,
+                "rosters": rosters,
+                "transactions": transactions,
+                "players": players_list,
+                "rosters_players": rosters_players,
+            }
             print("[ENGINE] Sleeper data updated.")
         except Exception as e:
             print(f"[ENGINE] Failed to fetch Sleeper data: {e}")

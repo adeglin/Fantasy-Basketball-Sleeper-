@@ -148,6 +148,73 @@ def fetch_sleeper_players() -> Dict[str, Any]:
     url = f"https://api.sleeper.app/v1/players/nba"
     return _get_json(url, timeout=60)
 
+def fetch_sleeper_league_data(league_id: str) -> Dict[str, Any]:
+    """
+    Convenience wrapper used by update_engine.run_update.
+
+    It fetches all the Sleeper pieces we need and returns them in the
+    exact structure the frontend expects under bundle["sleeper"].
+    """
+    # Raw pieces
+    league = fetch_sleeper_league()
+    users = fetch_sleeper_users()
+    rosters = fetch_sleeper_rosters()
+    transactions = fetch_sleeper_transactions()
+    players_raw = fetch_sleeper_players()  # dict keyed by player_id
+
+    # Map user_id -> display_name
+    user_map = {
+        str(u.get("user_id")): (u.get("display_name") or u.get("username") or str(u.get("user_id")))
+        for u in users
+    }
+
+    # Normalize players into a list
+    players_list: List[Dict[str, Any]] = []
+    for pid, pdata in players_raw.items():
+        full_name = (
+            pdata.get("full_name")
+            or " ".join(filter(None, [pdata.get("first_name"), pdata.get("last_name")]))
+            or pid
+        )
+
+        players_list.append(
+            {
+                "sleeper_player_id": pid,
+                "full_name": full_name,
+                "team": pdata.get("team"),
+                "position": pdata.get("position"),
+                "fantasy_positions": pdata.get("fantasy_positions") or [],
+                "status": pdata.get("status"),
+                "injury_status": pdata.get("injury_status"),
+                "injury_notes": pdata.get("injury_notes"),
+                "active": pdata.get("active"),
+            }
+        )
+
+    # Build joined roster-player rows (for the Rosters tab)
+    rosters_players: List[Dict[str, Any]] = []
+    for r in rosters:
+        roster_id = r.get("roster_id")
+        owner_id = str(r.get("owner_id"))
+        display_name = user_map.get(owner_id, owner_id)
+        for pid in r.get("players") or []:
+            rosters_players.append(
+                {
+                    "roster_id": roster_id,
+                    "owner_id": owner_id,
+                    "display_name": display_name,
+                    "sleeper_player_id": pid,
+                }
+            )
+
+    return {
+        "league": league,
+        "users": users,
+        "rosters": rosters,
+        "transactions": transactions,
+        "players": players_list,
+        "rosters_players": rosters_players,
+    }
 
 # -----------------------------
 # ESPN injuries
