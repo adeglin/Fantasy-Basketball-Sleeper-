@@ -68,12 +68,132 @@ function setupTabs() {
   });
 }
 
+// ============ BUNDLE NORMALIZATION (KEY FIX) ============
+
+function computeSeasonStatsFromLogs(logs) {
+  const byKey = new Map();
+
+  for (const g of logs || []) {
+    const pid = g.PLAYER_ID ?? g.player_id ?? g.PLAYER_NAME ?? "";
+    const team = g.TEAM_ABBREVIATION || g.TEAM_ABBR || "";
+    const key = `${pid}|${team}`;
+
+    let rec = byKey.get(key);
+    if (!rec) {
+      rec = {
+        PLAYER_ID: pid,
+        PLAYER_NAME: g.PLAYER_NAME || g.player_name || "",
+        TEAM_ABBREVIATION: team,
+        GP: 0,
+        MIN: 0,
+        PTS: 0,
+        REB: 0,
+        AST: 0,
+      };
+      byKey.set(key, rec);
+    }
+
+    const min = Number(g.MIN) || 0;
+    const pts = Number(g.PTS) || 0;
+    // Some nba_api frames use REB, some use different naming, be defensive:
+    const reb = Number(g.REB ?? g.TREB ?? g.REB_TOTAL ?? 0) || 0;
+    const ast = Number(g.AST) || 0;
+
+    rec.GP += 1;
+    rec.MIN += min;
+    rec.PTS += pts;
+    rec.REB += reb;
+    rec.AST += ast;
+  }
+
+  // Convert to per-game averages (1 decimal)
+  for (const rec of byKey.values()) {
+    if (rec.GP > 0) {
+      rec.MIN = +(rec.MIN / rec.GP).toFixed(1);
+      rec.PTS = +(rec.PTS / rec.GP).toFixed(1);
+      rec.REB = +(rec.REB / rec.GP).toFixed(1);
+      rec.AST = +(rec.AST / rec.GP).toFixed(1);
+    }
+  }
+
+  return Array.from(byKey.values());
+}
+
+/**
+ * Normalize whatever JSON the backend wrote into the shape
+ * the frontend expects:
+ *   bundle.meta.current_season
+ *   bundle.nba.seasons[season].game_logs
+ *   bundle.nba.seasons[season].season_stats
+ */
+function normalizeBundle(rawBundle) {
+  const bundle = rawBundle || {};
+
+  if (!bundle.meta) bundle.meta = {};
+
+  // 1) Determine current season
+  if (!bundle.meta.current_season) {
+    const fromMetaSeason = bundle.meta.season;
+    const fromNBA =
+      bundle.nba?.seasons &&
+      Object.keys(bundle.nba.seasons).length > 0
+        ? Object.keys(bundle.nba.seasons)[0]
+        : undefined;
+    bundle.meta.current_season =
+      bundle.meta.current_season || fromMetaSeason || fromNBA || "";
+  }
+
+  // 2) If nba.seasons already exists, keep it
+  if (bundle.nba?.seasons && Object.keys(bundle.nba.seasons).length > 0) {
+    return bundle;
+  }
+
+  // 3) If we have flat player_gamelogs, build nba.seasons on the fly
+  if (!bundle.nba && Array.isArray(bundle.player_gamelogs)) {
+    const logs = bundle.player_gamelogs;
+    const seasonFromLogs = logs[0]?.SEASON_YEAR;
+    const seasonKey =
+      bundle.meta.current_season ||
+      bundle.meta.season ||
+      seasonFromLogs ||
+      "Unknown";
+
+    bundle.meta.current_season = seasonKey;
+
+    const seasonStats = computeSeasonStatsFromLogs(logs);
+
+    bundle.nba = {
+      seasons: {
+        [seasonKey]: {
+          game_logs: logs,
+          season_stats: seasonStats,
+        },
+      },
+    };
+
+    console.log(
+      `normalizeBundle: built nba.seasons from player_gamelogs for season ${seasonKey}`
+    );
+    return bundle;
+  }
+
+  // 4) If no NBA data at all, leave as-is; callers will show "no data"
+  if (!bundle.nba) {
+    console.warn("normalizeBundle: bundle has no nba data at all");
+  }
+
+  return bundle;
+}
+
 // ============ META / OVERVIEW ============
 
 function renderMeta(meta, leagueName) {
   const el = document.getElementById("meta");
   const namePart = leagueName ? ` | League: ${leagueName}` : "";
-  el.textContent = `Last updated (UTC): ${meta.generated_at_utc} | Current season: ${meta.current_season}${namePart}`;
+  const currentSeason = meta.current_season || meta.season || "";
+  el.textContent = `Last updated (UTC): ${
+    meta.generated_at_utc || "unknown"
+  } | Current season: ${currentSeason}${namePart}`;
 }
 
 function renderOverviewPlayers(bundle) {
@@ -206,7 +326,7 @@ function renderRostersTable(bundle) {
   doRender();
 }
 
-// ============ FREE AGENTS (ACTIVE 2025–26 OR FALLBACK) ============
+// ============ FREE AGENTS (ACTIVE CURRENT SEASON OR FALLBACK) ============
 
 function renderFreeAgentsTable(bundle) {
   const container = document.getElementById("fa-table");
@@ -587,6 +707,10 @@ async function init() {
     document.getElementById("meta").textContent = "Error loading data bundle.";
     return;
   }
+
+  // 🔧 Normalize the bundle so nba.seasons + current_season
+  // are always present, even if backend only wrote player_gamelogs.
+  bundle = normalizeBundle(bundle);
 
   const leagueName = bundle.sleeper?.league?.name || "";
   renderMeta(bundle.meta, leagueName);
