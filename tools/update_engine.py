@@ -1,13 +1,17 @@
 import os
 import json
+import math
 from datetime import datetime, timedelta, date
 
 from fetch_data import (
-    fetch_nba_boxscores_for_date,  # you already have some stats.nba.com function
-    fetch_sleeper_league_data,     # your existing Sleeper wrapper
-    fetch_espn_injuries            # your existing ESPN injuries wrapper
+    fetch_nba_boxscores_for_date,
+    fetch_sleeper_league,
+    fetch_sleeper_users,
+    fetch_sleeper_rosters,
+    fetch_sleeper_transactions,
+    fetch_sleeper_players,
+    fetch_espn_injuries,
 )
-
 
 DEFAULT_BUNDLE_PATH = os.path.join(
     os.path.dirname(os.path.dirname(__file__)),
@@ -163,9 +167,26 @@ def run_update(
 
     # === 4. Save ===
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+    import math
+
+    def _clean_nans(obj):
+        if isinstance(obj, float) and math.isnan(obj):
+            return None
+        if isinstance(obj, dict):
+            return {k: _clean_nans(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_clean_nans(x) for x in obj]
+        return obj
+
+    clean_bundle = _clean_nans(bundle)
+
     with open(output_path, "w") as f:
-        json.dump(bundle, f, indent=2, sort_keys=True)
-    print("[ENGINE] Update complete.")
+        json.dump(clean_bundle, f, indent=2, sort_keys=True)
+
     print(f"[ENGINE] Saved to {output_path}")
 
     return bundle
+
+
+
