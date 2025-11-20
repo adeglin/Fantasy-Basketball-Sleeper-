@@ -257,6 +257,24 @@ function normalizeBundle(rawBundle) {
   return bundle;
 }
 
+// Helper to pick the actual current season key from nba.seasons
+function getCurrentSeasonKey(bundle) {
+  const seasonsObj = bundle.nba?.seasons || {};
+  const keys = Object.keys(seasonsObj);
+  if (!keys.length) {
+    return bundle.meta.current_season || bundle.meta.season || "";
+  }
+  // If meta.current_season exists and is valid, use it
+  if (bundle.meta.current_season && seasonsObj[bundle.meta.current_season]) {
+    return bundle.meta.current_season;
+  }
+  // Otherwise, pick the latest season key (string sort)
+  keys.sort();
+  const latest = keys[keys.length - 1];
+  bundle.meta.current_season = latest;
+  return latest;
+}
+
 // ============ META / OVERVIEW ============
 
 function renderMeta(meta, leagueName) {
@@ -269,7 +287,7 @@ function renderMeta(meta, leagueName) {
 }
 
 function renderOverviewPlayers(bundle) {
-  const currentSeason = bundle.meta.current_season;
+  const currentSeason = getCurrentSeasonKey(bundle);
   const seasonBlock = bundle.nba?.seasons?.[currentSeason];
   const container = document.getElementById("overview-players-table");
 
@@ -407,7 +425,7 @@ function renderRostersTable(bundle) {
 function prepareFreeAgentsData(bundle) {
   const rostersPlayers = bundle.sleeper?.rosters_players || [];
   const players = bundle.sleeper?.players || [];
-  const currentSeason = bundle.meta.current_season;
+  const currentSeason = getCurrentSeasonKey(bundle);
   const seasonBlock = bundle.nba?.seasons?.[currentSeason];
   const logs = seasonBlock?.game_logs || [];
 
@@ -535,10 +553,12 @@ function prepareFreeAgentsData(bundle) {
           ).toFixed(1)
         : 0;
 
-    // Games missed this season = maxGP - gp (clamped to >= 0)
+    // Games missed this season = maxGP - gp (only if the player has actually played)
     let gamesMissed = 0;
-    if (maxGP > 0 && gp >= 0) {
+    if (maxGP > 0 && gp > 0) {
       gamesMissed = Math.max(0, maxGP - gp);
+    } else {
+      gamesMissed = 0;
     }
 
     const injuryList = injuriesByName.get(nm) || [];
@@ -648,7 +668,7 @@ function renderFreeAgentsTable() {
   const container = document.getElementById("fa-table");
   const filterInput = document.getElementById("fa-player-filter");
   const posSelect = document.getElementById("fa-pos-filter");
-  const gameFilterSelect = document.getElementById("fa-game-filter"); // NEW
+  const gameFilterSelect = document.getElementById("fa-schedule-filter");
 
   if (!bundle || !APP_STATE.faRows.length) {
     container.textContent = "No Sleeper free agents available.";
@@ -657,7 +677,7 @@ function renderFreeAgentsTable() {
 
   const nameFilter = (filterInput?.value || "").toLowerCase();
   const posFilter = posSelect?.value || "";
-  const gameFilter = gameFilterSelect?.value || ""; // "", "today", "tomorrow", "day2"
+  const gameFilter = gameFilterSelect?.value || ""; // "", "today", "tomorrow", "day_after"
 
   let rows = APP_STATE.faRows;
 
@@ -678,7 +698,7 @@ function renderFreeAgentsTable() {
     rows = rows.filter((r) => {
       if (gameFilter === "today") return !!r.playsToday;
       if (gameFilter === "tomorrow") return !!r.playsTomorrow;
-      if (gameFilter === "day2") return !!r.playsDayAfter;
+      if (gameFilter === "day_after") return !!r.playsDayAfter;
       return true;
     });
   }
@@ -820,7 +840,7 @@ function showPlayerDetailsModal(fullName) {
     }
   }
 
-  const currentSeason = bundle.meta.current_season;
+  const currentSeason = getCurrentSeasonKey(bundle);
   const currentLogs = perSeasonLogs[currentSeason] || [];
 
   function summarizeSeason(logs) {
@@ -943,15 +963,15 @@ function showPlayerDetailsModal(fullName) {
   }
 
   body.innerHTML = html;
-  modal.classList.add("open");
+  modal.classList.add("active");
 
   if (closeBtn) {
-    closeBtn.onclick = () => modal.classList.remove("open");
+    closeBtn.onclick = () => modal.classList.remove("active");
   }
 
   modal.addEventListener("click", (evt) => {
     if (evt.target === modal) {
-      modal.classList.remove("open");
+      modal.classList.remove("active");
     }
   });
 }
@@ -972,11 +992,13 @@ function setupGameLogs(bundle) {
   }
 
   seasons.sort();
+  const currentSeasonKey = getCurrentSeasonKey(bundle);
+
   for (const s of seasons) {
     const opt = document.createElement("option");
     opt.value = s;
     opt.textContent = s;
-    if (s === bundle.meta.current_season) opt.selected = true;
+    if (s === currentSeasonKey) opt.selected = true;
     seasonSelect.appendChild(opt);
   }
 
