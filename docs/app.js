@@ -68,193 +68,31 @@ function setupTabs() {
   });
 }
 
-// ============ BUNDLE NORMALIZATION (KEY FIX) ============
+// Parse NBA minutes that might be "34", "34.5", or "34:21"
+function parseMinutesField(val) {
+  if (val == null) return 0;
+  if (typeof val === "number" && !isNaN(val)) return val;
+  const s = String(val);
+  if (s.includes(":")) {
+    const [mStr, sStr] = s.split(":");
+    const m = parseFloat(mStr) || 0;
+    const sec = parseFloat(sStr) || 0;
+    return m + sec / 60;
+  }
+  const n = Number(s);
+  return isNaN(n) ? 0 : n;
+}
 
-function computeSeasonStatsFromLogs(logs) {
-  // Map of normalized player name -> season aggregates for current season
+// ============ GLOBALS ============
+
+// Map of normalized player name -> season aggregates for current season
 let gSeasonAggByNormName = null;
 // Map of normalized player name -> latest ESPN injury info
 let gInjuriesByNormName = null;
 
-/**
- * Compute per-player season aggregates for the current season:
- * - GP, per-game MIN / PTS / REB / AST / STL / BLK / TOV / FGM / FGA / FTM / FTA / 3PM
- * - FPTS per game (Sleeper scoring)
- * - Games missed (based on team games played)
- * - Weekly "lock-in" high average (avg weekly max game per Monday–Sunday week)
- */
-function computeSeasonAggregatesForCurrentSeason(bundle) {
-  const currentSeason = bundle.meta.current_season;
-  const seasonBlock = bundle.nba?.seasons?.[currentSeason];
-  if (!seasonBlock || !Array.isArray(seasonBlock.game_logs)) {
-    console.warn("computeSeasonAggregatesForCurrentSeason: no game_logs for current season", currentSeason);
-    return new Map();
-  }
+// ============ BUNDLE NORMALIZATION (LEGACY SEASON_STATS FALLBACK) ============
 
-  const logs = seasonBlock.game_logs;
-
-  // For games-missed: track distinct game dates per team
-  const teamDateSets = new Map(); // team -> Set(dateStr)
-
-  // Per-player accumulation by normalized name
-  const byPlayer = new Map(); // normName -> record
-
-  function getLockInWeekKey(dateObj) {
-    // Use UTC and group Monday–Sunday, with Monday as the start.
-    const d = new Date(Date.UTC(
-      dateObj.getUTCFullYear(),
-      dateObj.getUTCMonth(),
-      dateObj.getUTCDate()
-    ));
-    const dow = d.getUTCDay(); // 0=Sun,1=Mon,...,6=Sat
-    const offsetToMonday = (dow + 6) % 7; // Mon -> 0, Sun -> 6
-    d.setUTCDate(d.getUTCDate() - offsetToMonday);
-    return d.toISOString().slice(0, 10);
-  }
-
-  for (const g of logs) {
-    const rawName = g.PLAYER_NAME || g.player_name || "";
-    const nName = normName(rawName);
-    if (!nName) continue;
-
-    const team = g.TEAM_ABBREVIATION || g.TEAM_ABBR || g.TEAM || "";
-    const dateStr = g.GAME_DATE || g.GAME_DATE_EST || g.game_date || "";
-    let d = null;
-    if (dateStr) {
-      const tmp = new Date(dateStr);
-      if (!isNaN(tmp)) d = tmp;
-    }
-
-    const min = Number(g.MIN) || 0;
-    const pts = Number(g.PTS) || 0;
-    const reb = Number(g.REB ?? g.TREB ?? g.REB_TOTAL ?? 0) || 0;
-    const ast = Number(g.AST) || 0;
-    const stl = Number(g.STL) || 0;
-    const blk = Number(g.BLK ?? g.BLOCKS ?? 0) || 0;
-    const tov = Number(g.TOV ?? g.TO ?? 0) || 0;
-    const fgm = Number(g.FGM ?? g.FG ?? 0) || 0;
-    const fga = Number(g.FGA ?? g.FGA_ATTEMPTED ?? 0) || 0;
-    const ftm = Number(g.FTM ?? 0) || 0;
-    const fta = Number(g.FTA ?? 0) || 0;
-    const tpm = Number(g.FG3M ?? g["3PM"] ?? 0) || 0;
-
-    // Sleeper scoring for a single game:
-    const fptsGame =
-      pts * 1 +
-      reb * 1 +
-      ast * 2 +
-      stl * 4 +
-      blk * 4 +
-      tov * -2 +
-      fgm * 2 +
-      fga * -1 +
-      ftm * 1 +
-      fta * -1 +
-      tpm * 1;
-
-    let rec = byPlayer.get(nName);
-    if (!rec) {
-      rec = {
-        name: rawName,
-        team: team,
-        gp: 0,
-        min: 0,
-        pts: 0,
-        reb: 0,
-        ast: 0,
-        stl: 0,
-        blk: 0,
-        tov: 0,
-        fgm: 0,
-        fga: 0,
-        ftm: 0,
-        fta: 0,
-        tpm: 0,
-        fptsSum: 0,
-        weeklyHighs: new Map(), // weekKey -> max FPTS for that week
-      };
-      byPlayer.set(nName, rec);
-    }
-
-    rec.gp += 1;
-    rec.min += min;
-    rec.pts += pts;
-    rec.reb += reb;
-    rec.ast += ast;
-    rec.stl += stl;
-    rec.blk += blk;
-    rec.tov += tov;
-    rec.fgm += fgm;
-    rec.fga += fga;
-    rec.ftm += ftm;
-    rec.fta += fta;
-    rec.tpm += tpm;
-    rec.fptsSum += fptsGame;
-
-    if (team) rec.team = team;
-
-    // Weekly lock-in stat
-    if (d) {
-      const weekKey = getLockInWeekKey(d);
-      const prev = rec.weeklyHighs.get(weekKey);
-      if (prev == null || fptsGame > prev) {
-        rec.weeklyHighs.set(weekKey, fptsGame);
-      }
-
-      // Track team games played (distinct dates)
-      if (team) {
-        let set = teamDateSets.get(team);
-        if (!set) {
-          set = new Set();
-          teamDateSets.set(team, set);
-        }
-        set.add(dateStr);
-      }
-    }
-  }
-
-  const result = new Map();
-
-  for (const [nName, rec] of byPlayer.entries()) {
-    const team = rec.team || "";
-    const teamDatesSet = team ? teamDateSets.get(team) : null;
-    const teamGames = teamDatesSet ? teamDatesSet.size : null;
-
-    const weeklyValues = Array.from(rec.weeklyHighs.values());
-    const weeklyHighAvg = weeklyValues.length
-      ? weeklyValues.reduce((a, b) => a + b, 0) / weeklyValues.length
-      : null;
-
-    const gp = rec.gp || 0;
-    const per = (val) => (gp > 0 ? +(val / gp).toFixed(1) : 0);
-
-    const gamesMissed = teamGames != null ? Math.max(teamGames - gp, 0) : null;
-
-    result.set(nName, {
-      name: rec.name,
-      team,
-      gp,
-      minPerGame: per(rec.min),
-      ptsPerGame: per(rec.pts),
-      rebPerGame: per(rec.reb),
-      astPerGame: per(rec.ast),
-      stlPerGame: per(rec.stl),
-      blkPerGame: per(rec.blk),
-      tovPerGame: per(rec.tov),
-      fgmPerGame: per(rec.fgm),
-      fgaPerGame: per(rec.fga),
-      ftmPerGame: per(rec.ftm),
-      ftaPerGame: per(rec.fta),
-      tpmPerGame: per(rec.tpm),
-      fptsPerGame: gp > 0 ? +(rec.fptsSum / gp).toFixed(1) : 0,
-      weeklyHighAvg: weeklyHighAvg != null ? +weeklyHighAvg.toFixed(1) : null,
-      gamesMissed: gamesMissed != null ? gamesMissed : null,
-    });
-  }
-
-  return result;
-}
-
+function computeSeasonStatsFromLogs(logs) {
   const byKey = new Map();
 
   for (const g of logs || []) {
@@ -277,7 +115,7 @@ function computeSeasonAggregatesForCurrentSeason(bundle) {
       byKey.set(key, rec);
     }
 
-    const min = Number(g.MIN) || 0;
+    const min = parseMinutesField(g.MIN);
     const pts = Number(g.PTS) || 0;
     // Some nba_api frames use REB, some use different naming, be defensive:
     const reb = Number(g.REB ?? g.TREB ?? g.REB_TOTAL ?? 0) || 0;
@@ -319,8 +157,7 @@ function normalizeBundle(rawBundle) {
   if (!bundle.meta.current_season) {
     const fromMetaSeason = bundle.meta.season;
     const fromNBA =
-      bundle.nba?.seasons &&
-      Object.keys(bundle.nba.seasons).length > 0
+      bundle.nba?.seasons && Object.keys(bundle.nba.seasons).length > 0
         ? Object.keys(bundle.nba.seasons)[0]
         : undefined;
     bundle.meta.current_season =
@@ -391,11 +228,7 @@ function renderOverviewPlayers(bundle) {
     !seasonBlock.season_stats.length
   ) {
     container.textContent = "No current season data available.";
-    console.warn(
-      "No season_stats found for",
-      currentSeason,
-      bundle.nba?.seasons
-    );
+    console.warn("No season_stats found for", currentSeason, bundle.nba?.seasons);
     return;
   }
 
@@ -425,132 +258,192 @@ function renderOverviewPlayers(bundle) {
   container.innerHTML = html;
 }
 
-// ============ NBA STATS INDEX FOR CURRENT SEASON (FOR FREE AGENTS) ============
+// ============ SEASON AGGREGATES FOR CURRENT SEASON (FOR FREE AGENTS) ============
 
-function buildSeasonStatsIndexForCurrentSeason(bundle) {
+/**
+ * Compute per-player season aggregates for the current season:
+ * - GP, per-game MIN / PTS / REB / AST / STL / BLK / TOV / FGM / FGA / FTM / FTA / 3PM
+ * - FPTS per game (Sleeper scoring)
+ * - Games missed (based on team games played)
+ * - Weekly "lock-in" high average (avg weekly max game per Monday–Sunday week)
+ *
+ * Returns: Map(normName -> { name, team, gp, ... stats ... , fptsPerGame, weeklyHighAvg, gamesMissed })
+ */
+function computeSeasonAggregatesForCurrentSeason(bundle) {
   const currentSeason = bundle.meta.current_season;
   const seasonBlock = bundle.nba?.seasons?.[currentSeason];
-
   if (!seasonBlock || !Array.isArray(seasonBlock.game_logs)) {
-    console.warn("No game_logs for current season; cannot build stats index.");
-    return null;
+    console.warn(
+      "computeSeasonAggregatesForCurrentSeason: no game_logs for current season",
+      currentSeason
+    );
+    return new Map();
   }
 
   const logs = seasonBlock.game_logs;
-  const byKey = new Map(); // key = normName(name) + '|' + TEAM_ABBR
+
+  // For games-missed: track distinct game dates per team
+  const teamDateSets = new Map(); // team -> Set(dateStr)
+
+  // Per-player accumulation by normalized name
+  const byPlayer = new Map(); // normName -> record
+
+  function getLockInWeekKey(dateObj) {
+    // Use UTC and group Monday–Sunday, with Monday as the start.
+    const d = new Date(
+      Date.UTC(
+        dateObj.getUTCFullYear(),
+        dateObj.getUTCMonth(),
+        dateObj.getUTCDate()
+      )
+    );
+    const dow = d.getUTCDay(); // 0=Sun,1=Mon,...,6=Sat
+    const offsetToMonday = (dow + 6) % 7; // Mon -> 0, Sun -> 6
+    d.setUTCDate(d.getUTCDate() - offsetToMonday);
+    return d.toISOString().slice(0, 10);
+  }
 
   for (const g of logs) {
-    const name = g.PLAYER_NAME || g.player_name || "";
-    const team = g.TEAM_ABBREVIATION || g.TEAM_ABBR || "";
-    const key = `${normName(name)}|${team}`;
+    const rawName = g.PLAYER_NAME || g.player_name || "";
+    const nName = normName(rawName);
+    if (!nName) continue;
 
-    if (!name || !team) continue;
+    const team = g.TEAM_ABBREVIATION || g.TEAM_ABBR || g.TEAM || "";
+    const dateStr = g.GAME_DATE || g.GAME_DATE_EST || g.game_date || "";
+    let d = null;
+    if (dateStr) {
+      const tmp = new Date(dateStr);
+      if (!isNaN(tmp)) d = tmp;
+    }
 
-    let rec = byKey.get(key);
+    const min = parseMinutesField(g.MIN);
+    const pts = Number(g.PTS) || 0;
+    const reb = Number(g.REB ?? g.TREB ?? g.REB_TOTAL ?? 0) || 0;
+    const ast = Number(g.AST) || 0;
+    const stl = Number(g.STL) || 0;
+    const blk = Number(g.BLK ?? g.BLOCKS ?? 0) || 0;
+    const tov = Number(g.TOV ?? g.TO ?? 0) || 0;
+    const fgm = Number(g.FGM ?? g.FG ?? 0) || 0;
+    const fga = Number(g.FGA ?? g.FGA_ATTEMPTED ?? 0) || 0;
+    const ftm = Number(g.FTM ?? 0) || 0;
+    const fta = Number(g.FTA ?? 0) || 0;
+    const tpm = Number(g.FG3M ?? g["3PM"] ?? 0) || 0;
+
+    // Sleeper scoring for a single game:
+    const fptsGame =
+      pts * 1 +
+      reb * 1 +
+      ast * 2 +
+      stl * 4 +
+      blk * 4 +
+      tov * -2 +
+      fgm * 2 +
+      fga * -1 +
+      ftm * 1 +
+      fta * -1 +
+      tpm * 1;
+
+    let rec = byPlayer.get(nName);
     if (!rec) {
       rec = {
-        PLAYER_NAME: name,
-        TEAM_ABBREVIATION: team,
-        GP: 0,
-        MIN: 0,
-        PTS: 0,
-        REB: 0,
-        AST: 0,
-        STL: 0,
-        BLK: 0,
-        TOV: 0,
-        FGM: 0,
-        FGA: 0,
-        FTM: 0,
-        FTA: 0,
-        FG3M: 0,
-        FPTS: 0,          // fantasy points per game (computed later)
-        GAMES_MISSED: 0,  // computed later
+        name: rawName,
+        team: team,
+        gp: 0,
+        min: 0,
+        pts: 0,
+        reb: 0,
+        ast: 0,
+        stl: 0,
+        blk: 0,
+        tov: 0,
+        fgm: 0,
+        fga: 0,
+        ftm: 0,
+        fta: 0,
+        tpm: 0,
+        fptsSum: 0,
+        weeklyHighs: new Map(), // weekKey -> max FPTS for that week
       };
-      byKey.set(key, rec);
+      byPlayer.set(nName, rec);
     }
 
-    rec.GP += 1;
-    rec.MIN += Number(g.MIN) || 0;
-    rec.PTS += Number(g.PTS) || 0;
-    rec.REB += Number(g.REB ?? g.TREB ?? g.REB_TOTAL ?? 0) || 0;
-    rec.AST += Number(g.AST) || 0;
-    rec.STL += Number(g.STL ?? g.STEALS ?? 0) || 0;
-    rec.BLK += Number(g.BLK ?? g.BLOCKS ?? 0) || 0;
-    rec.TOV += Number(g.TOV ?? g.TO ?? 0) || 0;
-    rec.FGM += Number(g.FGM ?? g.FG_MADE ?? 0) || 0;
-    rec.FGA += Number(g.FGA ?? g.FG_ATTEMPTED ?? 0) || 0;
-    rec.FTM += Number(g.FTM ?? g.FT_MADE ?? 0) || 0;
-    rec.FTA += Number(g.FTA ?? g.FT_ATTEMPTED ?? 0) || 0;
-    rec.FG3M += Number(g.FG3M ?? g.FG3_MADE ?? g.THREES_MADE ?? 0) || 0;
-  }
+    rec.gp += 1;
+    rec.min += min;
+    rec.pts += pts;
+    rec.reb += reb;
+    rec.ast += ast;
+    rec.stl += stl;
+    rec.blk += blk;
+    rec.tov += tov;
+    rec.fgm += fgm;
+    rec.fga += fga;
+    rec.ftm += ftm;
+    rec.fta += fta;
+    rec.tpm += tpm;
+    rec.fptsSum += fptsGame;
 
-  // Compute per-game averages, fantasy points, and games missed
-  const teamGames = new Map(); // TEAM_ABBR -> max GP (proxy for games played)
+    if (team) rec.team = team;
 
-  for (const rec of byKey.values()) {
-    if (rec.GP > 0) {
-      rec.MIN = +(rec.MIN / rec.GP).toFixed(1);
-      rec.PTS = +(rec.PTS / rec.GP).toFixed(1);
-      rec.REB = +(rec.REB / rec.GP).toFixed(1);
-      rec.AST = +(rec.AST / rec.GP).toFixed(1);
-      rec.STL = +(rec.STL / rec.GP).toFixed(1);
-      rec.BLK = +(rec.BLK / rec.GP).toFixed(1);
-      rec.TOV = +(rec.TOV / rec.GP).toFixed(1);
-      rec.FGM = +(rec.FGM / rec.GP).toFixed(1);
-      rec.FGA = +(rec.FGA / rec.GP).toFixed(1);
-      rec.FTM = +(rec.FTM / rec.GP).toFixed(1);
-      rec.FTA = +(rec.FTA / rec.GP).toFixed(1);
-      rec.FG3M = +(rec.FG3M / rec.GP).toFixed(1);
+    // Weekly lock-in stat + team games tracking
+    if (d) {
+      const weekKey = getLockInWeekKey(d);
+      const prev = rec.weeklyHighs.get(weekKey);
+      if (prev == null || fptsGame > prev) {
+        rec.weeklyHighs.set(weekKey, fptsGame);
+      }
 
-      // Sleeper scoring:
-      // PTS: +1, REB: +1, AST: +2, STL: +4, BLK: +4, TOV: -2,
-      // FGM: +2, FGA: -1, FTM: +1, FTA: -1, 3PM: +1
-      const fpts =
-        rec.PTS * 1 +
-        rec.REB * 1 +
-        rec.AST * 2 +
-        rec.STL * 4 +
-        rec.BLK * 4 +
-        rec.TOV * -2 +
-        rec.FGM * 2 +
-        rec.FGA * -1 +
-        rec.FTM * 1 +
-        rec.FTA * -1 +
-        rec.FG3M * 1;
-
-      rec.FPTS = +fpts.toFixed(1);
-    }
-
-    const team = rec.TEAM_ABBREVIATION || "";
-    if (team) {
-      const prev = teamGames.get(team) || 0;
-      if (rec.GP > prev) teamGames.set(team, rec.GP);
+      if (team) {
+        let set = teamDateSets.get(team);
+        if (!set) {
+          set = new Set();
+          teamDateSets.set(team, set);
+        }
+        set.add(dateStr);
+      }
     }
   }
 
-  for (const rec of byKey.values()) {
-    const team = rec.TEAM_ABBREVIATION || "";
-    const maxGP = teamGames.get(team) || rec.GP;
-    rec.GAMES_MISSED = Math.max(0, maxGP - rec.GP);
+  const result = new Map();
+
+  for (const [nName, rec] of byPlayer.entries()) {
+    const team = rec.team || "";
+    const teamDatesSet = team ? teamDateSets.get(team) : null;
+    const teamGames = teamDatesSet ? teamDatesSet.size : null;
+
+    const weeklyValues = Array.from(rec.weeklyHighs.values());
+    const weeklyHighAvg = weeklyValues.length
+      ? weeklyValues.reduce((a, b) => a + b, 0) / weeklyValues.length
+      : null;
+
+    const gp = rec.gp || 0;
+    const per = (val) => (gp > 0 ? +(val / gp).toFixed(1) : 0);
+
+    const gamesMissed = teamGames != null ? Math.max(teamGames - gp, 0) : null;
+
+    result.set(nName, {
+      name: rec.name,
+      team,
+      gp,
+      minPerGame: per(rec.min),
+      ptsPerGame: per(rec.pts),
+      rebPerGame: per(rec.reb),
+      astPerGame: per(rec.ast),
+      stlPerGame: per(rec.stl),
+      blkPerGame: per(rec.blk),
+      tovPerGame: per(rec.tov),
+      fgmPerGame: per(rec.fgm),
+      fgaPerGame: per(rec.fga),
+      ftmPerGame: per(rec.ftm),
+      ftaPerGame: per(rec.fta),
+      tpmPerGame: per(rec.tpm),
+      fptsPerGame: gp > 0 ? +(rec.fptsSum / gp).toFixed(1) : 0,
+      weeklyHighAvg:
+        weeklyHighAvg != null ? +weeklyHighAvg.toFixed(1) : null,
+      gamesMissed: gamesMissed != null ? gamesMissed : null,
+    });
   }
 
-  // Build two indexes: by name+team, and by name only (best GP)
-  const byNameTeam = new Map();
-  const byName = new Map();
-
-  for (const rec of byKey.values()) {
-    const keyNameTeam = `${normName(rec.PLAYER_NAME)}|${rec.TEAM_ABBREVIATION}`;
-    byNameTeam.set(keyNameTeam, rec);
-
-    const n = normName(rec.PLAYER_NAME);
-    const existing = byName.get(n);
-    if (!existing || rec.GP > existing.GP) {
-      byName.set(n, rec);
-    }
-  }
-
-  return { byNameTeam, byName };
+  return result;
 }
 
 // ============ ROSTERS (FULL PER OWNER) ============
@@ -621,7 +514,9 @@ function renderRostersTable(bundle) {
       html += `<td>${esc(p.full_name || pid)}</td>`;
       html += `<td>${esc(p.team || "")}</td>`;
       html += `${
-        pos ? `<td><span class="pill pill-pos">${esc(pos)}</span></td>` : "<td></td>"
+        pos
+          ? `<td><span class="pill pill-pos">${esc(pos)}</span></td>`
+          : "<td></td>"
       }`;
       html += `<td>${esc(fpos)}</td>`;
       html += `<td>${esc(injDisplay)}</td>`;
@@ -638,7 +533,7 @@ function renderRostersTable(bundle) {
   doRender();
 }
 
-// ============ FREE AGENTS (ACTIVE CURRENT SEASON OR FALLBACK) ============
+// ============ FREE AGENTS (ACTIVE CURRENT SEASON, WITH STATS & INJURIES) ============
 
 function renderFreeAgentsTable(bundle, seasonAggByNormName) {
   const container = document.getElementById("fa-table");
@@ -665,16 +560,15 @@ function renderFreeAgentsTable(bundle, seasonAggByNormName) {
     }
   }
 
-  // Base candidate FAs: unowned, on a team, active, NOT two-way/ten-day
-  let candidateFA;
-
+  // Only ACT status, no two-way / ten-day
   function isDisplayableStatus(status) {
     if (!status) return false;
     if (status === "ACT") return true;
-    // Explicitly exclude two-way / ten-day
     if (status === "TWO-WAY" || status === "TEN-DAY") return false;
     return false;
   }
+
+  let candidateFA;
 
   if (hasSeasonStats) {
     const stats = seasonBlock.season_stats;
@@ -697,7 +591,7 @@ function renderFreeAgentsTable(bundle, seasonAggByNormName) {
     candidateFA = players.filter((p) => {
       const id = String(p.sleeper_player_id || "");
       if (!id || owned.has(id)) return false;
-      if (!p.team) return false; // must be on an NBA team
+      if (!p.team) return false;
       if (p.status === "RET") return false;
       if (p.active === false) return false;
       if (!isDisplayableStatus(p.status)) return false;
@@ -711,9 +605,9 @@ function renderFreeAgentsTable(bundle, seasonAggByNormName) {
   let currentSortKey = "fptsPerGame";
   let currentSortDir = -1; // -1 = desc, 1 = asc
 
-  function getInjuryForPlayer(normName) {
+  function getInjuryForPlayer(n) {
     if (!gInjuriesByNormName) return null;
-    return gInjuriesByNormName.get(normName) || null;
+    return gInjuriesByNormName.get(n) || null;
   }
 
   function doRender() {
@@ -721,28 +615,30 @@ function renderFreeAgentsTable(bundle, seasonAggByNormName) {
     const posFilter = posSelect.value || "";
 
     // Build row objects: { p, stats, inj }
-    let rows = candidateFA.filter((p) => {
-      if (nameFilter) {
-        if (!(p.full_name || "").toLowerCase().includes(nameFilter)) {
-          return false;
+    let rows = candidateFA
+      .filter((p) => {
+        if (nameFilter) {
+          if (!(p.full_name || "").toLowerCase().includes(nameFilter)) {
+            return false;
+          }
         }
-      }
-      if (posFilter) {
-        const pos = p.position || "";
-        const fpos = (p.fantasy_positions || []).join(",");
-        if (!pos.includes(posFilter) && !fpos.includes(posFilter)) {
-          return false;
+        if (posFilter) {
+          const pos = p.position || "";
+          const fpos = (p.fantasy_positions || []).join(",");
+          if (!pos.includes(posFilter) && !fpos.includes(posFilter)) {
+            return false;
+          }
         }
-      }
-      return true;
-    }).map((p) => {
-      const nName = normName(p.full_name);
-      const stats = seasonAggByNormName
-        ? seasonAggByNormName.get(nName) || {}
-        : {};
-      const inj = getInjuryForPlayer(nName);
-      return { p, stats, inj };
-    });
+        return true;
+      })
+      .map((p) => {
+        const nName = normName(p.full_name);
+        const stats = seasonAggByNormName
+          ? seasonAggByNormName.get(nName) || {}
+          : {};
+        const inj = getInjuryForPlayer(nName);
+        return { p, stats, inj };
+      });
 
     function getSortValue(row) {
       const stats = row.stats || {};
@@ -753,6 +649,8 @@ function renderFreeAgentsTable(bundle, seasonAggByNormName) {
           return (row.p.team || "").toLowerCase();
         case "fpos":
           return (row.p.fantasy_positions || []).join(",").toLowerCase();
+        case "gp":
+          return stats.gp ?? 0;
         case "fptsPerGame":
           return stats.fptsPerGame ?? 0;
         case "minPerGame":
@@ -831,11 +729,7 @@ function renderFreeAgentsTable(bundle, seasonAggByNormName) {
       let injSince = "";
 
       if (inj) {
-        injSummary = [
-          inj.status || "",
-          inj.type || "",
-          inj.detail || "",
-        ]
+        injSummary = [inj.status || "", inj.type || "", inj.detail || ""]
           .filter(Boolean)
           .join(" — ");
 
@@ -872,7 +766,7 @@ function renderFreeAgentsTable(bundle, seasonAggByNormName) {
     html += "</tbody></table>";
     container.innerHTML = html;
 
-    // Attach sort handlers after table is rendered
+    // Attach sort handlers
     const headers = container.querySelectorAll("th[data-sort-key]");
     headers.forEach((th) => {
       th.addEventListener("click", () => {
@@ -1005,10 +899,7 @@ function renderTransactions(bundle) {
   const playerMap = new Map();
   for (const p of players) {
     if (!p.sleeper_player_id) continue;
-    playerMap.set(
-      String(p.sleeper_player_id),
-      p.full_name || p.sleeper_player_id
-    );
+    playerMap.set(String(p.sleeper_player_id), p.full_name || p.sleeper_player_id);
   }
 
   const userMap = new Map();
@@ -1151,12 +1042,10 @@ async function fetchLiveInjuries() {
     let html = "<table><thead><tr>";
     html +=
       "<th>Player</th><th>Team</th><th>Status</th><th>Injury</th><th>Detail</th><th>Return</th><th>Since</th>";
-    html += "</tr></thead><tbody>";
+   html += "</tr></thead><tbody>";
 
     for (const inj of injuries) {
-      const statusPill = `<span class="pill pill-inj">${esc(
-        inj.status
-      )}</span>`;
+      const statusPill = `<span class="pill pill-inj">${esc(inj.status)}</span>`;
       html += "<tr>";
       html += `<td>${esc(inj.player)}</td>`;
       html += `<td>${esc(inj.team)}</td>`;
@@ -1196,8 +1085,7 @@ async function init() {
     return;
   }
 
-  // 🔧 Normalize the bundle so nba.seasons + current_season
-  // are always present, even if backend only wrote player_gamelogs.
+  // Normalize the bundle so nba.seasons + current_season are always present
   bundle = normalizeBundle(bundle);
 
   // Build per-player season aggregates for the current season
@@ -1216,5 +1104,3 @@ async function init() {
 }
 
 init();
-
-
