@@ -241,6 +241,134 @@ function renderOverviewPlayers(bundle) {
   container.innerHTML = html;
 }
 
+// ============ NBA STATS INDEX FOR CURRENT SEASON (FOR FREE AGENTS) ============
+
+function buildSeasonStatsIndexForCurrentSeason(bundle) {
+  const currentSeason = bundle.meta.current_season;
+  const seasonBlock = bundle.nba?.seasons?.[currentSeason];
+
+  if (!seasonBlock || !Array.isArray(seasonBlock.game_logs)) {
+    console.warn("No game_logs for current season; cannot build stats index.");
+    return null;
+  }
+
+  const logs = seasonBlock.game_logs;
+  const byKey = new Map(); // key = normName(name) + '|' + TEAM_ABBR
+
+  for (const g of logs) {
+    const name = g.PLAYER_NAME || g.player_name || "";
+    const team = g.TEAM_ABBREVIATION || g.TEAM_ABBR || "";
+    const key = `${normName(name)}|${team}`;
+
+    if (!name || !team) continue;
+
+    let rec = byKey.get(key);
+    if (!rec) {
+      rec = {
+        PLAYER_NAME: name,
+        TEAM_ABBREVIATION: team,
+        GP: 0,
+        MIN: 0,
+        PTS: 0,
+        REB: 0,
+        AST: 0,
+        STL: 0,
+        BLK: 0,
+        TOV: 0,
+        FGM: 0,
+        FGA: 0,
+        FTM: 0,
+        FTA: 0,
+        FG3M: 0,
+        FPTS: 0,          // fantasy points per game (computed later)
+        GAMES_MISSED: 0,  // computed later
+      };
+      byKey.set(key, rec);
+    }
+
+    rec.GP += 1;
+    rec.MIN += Number(g.MIN) || 0;
+    rec.PTS += Number(g.PTS) || 0;
+    rec.REB += Number(g.REB ?? g.TREB ?? g.REB_TOTAL ?? 0) || 0;
+    rec.AST += Number(g.AST) || 0;
+    rec.STL += Number(g.STL ?? g.STEALS ?? 0) || 0;
+    rec.BLK += Number(g.BLK ?? g.BLOCKS ?? 0) || 0;
+    rec.TOV += Number(g.TOV ?? g.TO ?? 0) || 0;
+    rec.FGM += Number(g.FGM ?? g.FG_MADE ?? 0) || 0;
+    rec.FGA += Number(g.FGA ?? g.FG_ATTEMPTED ?? 0) || 0;
+    rec.FTM += Number(g.FTM ?? g.FT_MADE ?? 0) || 0;
+    rec.FTA += Number(g.FTA ?? g.FT_ATTEMPTED ?? 0) || 0;
+    rec.FG3M += Number(g.FG3M ?? g.FG3_MADE ?? g.THREES_MADE ?? 0) || 0;
+  }
+
+  // Compute per-game averages, fantasy points, and games missed
+  const teamGames = new Map(); // TEAM_ABBR -> max GP (proxy for games played)
+
+  for (const rec of byKey.values()) {
+    if (rec.GP > 0) {
+      rec.MIN = +(rec.MIN / rec.GP).toFixed(1);
+      rec.PTS = +(rec.PTS / rec.GP).toFixed(1);
+      rec.REB = +(rec.REB / rec.GP).toFixed(1);
+      rec.AST = +(rec.AST / rec.GP).toFixed(1);
+      rec.STL = +(rec.STL / rec.GP).toFixed(1);
+      rec.BLK = +(rec.BLK / rec.GP).toFixed(1);
+      rec.TOV = +(rec.TOV / rec.GP).toFixed(1);
+      rec.FGM = +(rec.FGM / rec.GP).toFixed(1);
+      rec.FGA = +(rec.FGA / rec.GP).toFixed(1);
+      rec.FTM = +(rec.FTM / rec.GP).toFixed(1);
+      rec.FTA = +(rec.FTA / rec.GP).toFixed(1);
+      rec.FG3M = +(rec.FG3M / rec.GP).toFixed(1);
+
+      // Sleeper scoring:
+      // PTS: +1, REB: +1, AST: +2, STL: +4, BLK: +4, TOV: -2,
+      // FGM: +2, FGA: -1, FTM: +1, FTA: -1, 3PM: +1
+      const fpts =
+        rec.PTS * 1 +
+        rec.REB * 1 +
+        rec.AST * 2 +
+        rec.STL * 4 +
+        rec.BLK * 4 +
+        rec.TOV * -2 +
+        rec.FGM * 2 +
+        rec.FGA * -1 +
+        rec.FTM * 1 +
+        rec.FTA * -1 +
+        rec.FG3M * 1;
+
+      rec.FPTS = +fpts.toFixed(1);
+    }
+
+    const team = rec.TEAM_ABBREVIATION || "";
+    if (team) {
+      const prev = teamGames.get(team) || 0;
+      if (rec.GP > prev) teamGames.set(team, rec.GP);
+    }
+  }
+
+  for (const rec of byKey.values()) {
+    const team = rec.TEAM_ABBREVIATION || "";
+    const maxGP = teamGames.get(team) || rec.GP;
+    rec.GAMES_MISSED = Math.max(0, maxGP - rec.GP);
+  }
+
+  // Build two indexes: by name+team, and by name only (best GP)
+  const byNameTeam = new Map();
+  const byName = new Map();
+
+  for (const rec of byKey.values()) {
+    const keyNameTeam = `${normName(rec.PLAYER_NAME)}|${rec.TEAM_ABBREVIATION}`;
+    byNameTeam.set(keyNameTeam, rec);
+
+    const n = normName(rec.PLAYER_NAME);
+    const existing = byName.get(n);
+    if (!existing || rec.GP > existing.GP) {
+      byName.set(n, rec);
+    }
+  }
+
+  return { byNameTeam, byName };
+}
+
 // ============ ROSTERS (FULL PER OWNER) ============
 
 function renderRostersTable(bundle) {
@@ -328,7 +456,7 @@ function renderRostersTable(bundle) {
 
 // ============ FREE AGENTS (ACTIVE CURRENT SEASON OR FALLBACK) ============
 
-function renderFreeAgentsTable(bundle) {
+function renderFreeAgentsTable(bundle, injuryIndex) {
   const container = document.getElementById("fa-table");
   const rostersPlayers = bundle.sleeper?.rosters_players || [];
   const players = bundle.sleeper?.players || [];
@@ -342,8 +470,13 @@ function renderFreeAgentsTable(bundle) {
   const seasonBlock = bundle.nba?.seasons?.[currentSeason];
   const hasSeasonStats =
     seasonBlock &&
-    Array.isArray(seasonBlock.season_stats) &&
-    seasonBlock.season_stats.length > 0;
+    Array.isArray(seasonBlock.game_logs) &&
+    seasonBlock.game_logs.length > 0;
+
+  // Index of NBA season stats for current season
+  const statsIndex = hasSeasonStats
+    ? buildSeasonStatsIndexForCurrentSeason(bundle)
+    : null;
 
   // Which players are already owned in the league
   const owned = new Set();
@@ -357,34 +490,65 @@ function renderFreeAgentsTable(bundle) {
 
   if (hasSeasonStats) {
     // Preferred: active current-season NBA players with stats, not rostered
-    const stats = seasonBlock.season_stats;
-    const statsNameSet = new Set(stats.map((s) => normName(s.PLAYER_NAME)));
-
     candidateFA = players.filter((p) => {
       const id = String(p.sleeper_player_id || "");
       if (!id || owned.has(id)) return false;
       if (!p.team) return false;
       if (p.active === false) return false;
 
-      const nm = normName(p.full_name);
-      if (!statsNameSet.has(nm)) return false;
+      // Only standard active contract players (exclude TWO-WAY, TEN-DAY, etc.)
+      if (p.status && p.status !== "ACT") return false;
 
-      return true;
+      const nm = normName(p.full_name);
+      const team = (p.team || "").toUpperCase();
+      const keyTeam = `${nm}|${team}`;
+
+      if (!statsIndex) return false;
+
+      const hasStats =
+        statsIndex.byNameTeam.has(keyTeam) || statsIndex.byName.has(nm);
+      return hasStats;
     });
   } else {
-    // Fallback: no NBA stats available – use Sleeper only
+    // Fallback: no NBA stats available – use Sleeper only, still filter status
     candidateFA = players.filter((p) => {
       const id = String(p.sleeper_player_id || "");
       if (!id || owned.has(id)) return false;
-      if (!p.team) return false; // must be on an NBA team
-      if (p.status === "RET") return false;
+      if (!p.team) return false;
       if (p.active === false) return false;
+      if (p.status && p.status !== "ACT") return false;
       return true;
     });
   }
 
   const filterInput = document.getElementById("fa-player-filter");
   const posSelect = document.getElementById("fa-pos-filter");
+
+  function lookupStatsForPlayer(p) {
+    if (!statsIndex) return null;
+    const nm = normName(p.full_name);
+    const team = (p.team || "").toUpperCase();
+    const keyTeam = `${nm}|${team}`;
+
+    return (
+      statsIndex.byNameTeam.get(keyTeam) ||
+      statsIndex.byName.get(nm) ||
+      null
+    );
+  }
+
+  function lookupInjuryForPlayer(p) {
+    if (!injuryIndex) return null;
+    const nm = normName(p.full_name);
+    const team = (p.team || "").toUpperCase();
+    const keyTeam = `${nm}|${team}`;
+
+    return (
+      injuryIndex.get(keyTeam) ||
+      injuryIndex.get(nm) ||
+      null
+    );
+  }
 
   function doRender() {
     const nameFilter = (filterInput.value || "").toLowerCase();
@@ -400,9 +564,8 @@ function renderFreeAgentsTable(bundle) {
 
     if (posFilter) {
       rows = rows.filter((p) => {
-        const pos = p.position || "";
         const fpos = (p.fantasy_positions || []).join(",");
-        return pos.includes(posFilter) || fpos.includes(posFilter);
+        return fpos.includes(posFilter);
       });
     }
 
@@ -412,25 +575,63 @@ function renderFreeAgentsTable(bundle) {
 
     let html = "<table><thead><tr>";
     html +=
-      "<th>Player</th><th>Team</th><th>Pos</th><th>Fantasy Pos</th><th>Status</th><th>Injury</th>";
+      "<th>Player</th><th>Team</th><th>Fantasy Pos</th>" +
+      "<th>MIN</th><th>GP</th><th>Games Missed</th><th>FPTS</th>" +
+      "<th>PTS</th><th>REB</th><th>AST</th><th>STL</th><th>BLK</th>" +
+      "<th>3PM</th><th>FGM</th><th>FGA</th><th>FTM</th><th>FTA</th>" +
+      "<th>Injury</th>";
     html += "</tr></thead><tbody>";
 
     for (const p of rows) {
-      const pos = p.position || "";
       const fpos = (p.fantasy_positions || []).join(", ");
-      const status = p.status || "";
-      const inj = p.injury_status || "";
-      const injNotes = p.injury_notes || "";
+      const stats = lookupStatsForPlayer(p);
+      const inj = lookupInjuryForPlayer(p);
+
+      const min = stats ? stats.MIN : "";
+      const gp = stats ? stats.GP : "";
+      const gm = stats ? stats.GAMES_MISSED : "";
+      const fpts = stats ? stats.FPTS : "";
+
+      const pts = stats ? stats.PTS : "";
+      const reb = stats ? stats.REB : "";
+      const ast = stats ? stats.AST : "";
+      const stl = stats ? stats.STL : "";
+      const blk = stats ? stats.BLK : "";
+      const fg3m = stats ? stats.FG3M : "";
+      const fgm = stats ? stats.FGM : "";
+      const fga = stats ? stats.FGA : "";
+      const ftm = stats ? stats.FTM : "";
+      const fta = stats ? stats.FTA : "";
+
+      let injDisplay = "";
+      if (inj) {
+        const parts = [];
+        if (inj.status) parts.push(inj.status);
+        if (inj.type) parts.push(inj.type);
+        if (inj.detail) parts.push(inj.detail);
+        if (inj.returnDate) parts.push(`Return: ${inj.returnDate}`);
+        injDisplay = parts.join(" — ");
+      }
 
       html += "<tr>";
       html += `<td>${esc(p.full_name || p.sleeper_player_id)}</td>`;
       html += `<td>${esc(p.team || "")}</td>`;
-      html += `${
-        pos ? `<td><span class="pill pill-pos">${esc(pos)}</span></td>` : "<td></td>"
-      }`;
       html += `<td>${esc(fpos)}</td>`;
-      html += `<td>${esc(status)}</td>`;
-      html += `<td>${esc(inj + (injNotes ? " — " + injNotes : ""))}</td>`;
+      html += `<td>${esc(min)}</td>`;
+      html += `<td>${esc(gp)}</td>`;
+      html += `<td>${esc(gm)}</td>`;
+      html += `<td>${esc(fpts)}</td>`;
+      html += `<td>${esc(pts)}</td>`;
+      html += `<td>${esc(reb)}</td>`;
+      html += `<td>${esc(ast)}</td>`;
+      html += `<td>${esc(stl)}</td>`;
+      html += `<td>${esc(blk)}</td>`;
+      html += `<td>${esc(fg3m)}</td>`;
+      html += `<td>${esc(fgm)}</td>`;
+      html += `<td>${esc(fga)}</td>`;
+      html += `<td>${esc(ftm)}</td>`;
+      html += `<td>${esc(fta)}</td>`;
+      html += `<td>${esc(injDisplay)}</td>`;
       html += "</tr>";
     }
 
@@ -657,7 +858,7 @@ async function fetchLiveInjuries() {
 
     if (!injuries.length) {
       container.textContent = "No injuries reported.";
-      return;
+      return { injuries: [], injuryIndex: new Map() };
     }
 
     injuries.sort((a, b) => {
@@ -666,6 +867,7 @@ async function fetchLiveInjuries() {
       return a.player.localeCompare(b.player);
     });
 
+    // Render the injuries table (as before)
     let html = "<table><thead><tr>";
     html +=
       "<th>Player</th><th>Team</th><th>Status</th><th>Injury</th><th>Detail</th><th>Return</th>";
@@ -687,10 +889,25 @@ async function fetchLiveInjuries() {
 
     html += "</tbody></table>";
     container.innerHTML = html;
+
+    // Build an index for cross-referencing:
+    const injuryIndex = new Map();
+    for (const inj of injuries) {
+      const keyTeam = `${normName(inj.player)}|${(inj.team || "").toUpperCase()}`;
+      injuryIndex.set(keyTeam, inj);
+
+      const keyName = normName(inj.player);
+      if (!injuryIndex.has(keyName)) {
+        injuryIndex.set(keyName, inj);
+      }
+    }
+
+    return { injuries, injuryIndex };
   } catch (err) {
     console.error("Error fetching live injuries:", err);
     container.textContent =
       "Could not load live injuries. ESPN may be blocking cross-origin requests; later we can add a backend proxy if needed.";
+    return { injuries: [], injuryIndex: new Map() };
   }
 }
 
@@ -712,16 +929,24 @@ async function init() {
   // are always present, even if backend only wrote player_gamelogs.
   bundle = normalizeBundle(bundle);
 
+  // Fetch live injuries and build index (also renders Injuries tab)
+  let injuryIndex = null;
+  try {
+    const injuryData = await fetchLiveInjuries();
+    injuryIndex = injuryData.injuryIndex || new Map();
+  } catch (e) {
+    console.warn("Injuries fetch failed; continuing without injury index.", e);
+    injuryIndex = new Map();
+  }
+
   const leagueName = bundle.sleeper?.league?.name || "";
   renderMeta(bundle.meta, leagueName);
   renderOverviewPlayers(bundle);
   renderRostersTable(bundle);
-  renderFreeAgentsTable(bundle);
+  renderFreeAgentsTable(bundle, injuryIndex);
   setupGameLogs(bundle);
   renderTransactions(bundle);
-
-  // Live injuries are always pulled fresh
-  fetchLiveInjuries();
 }
 
 init();
+
