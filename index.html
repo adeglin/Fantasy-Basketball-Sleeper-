@@ -145,6 +145,62 @@
     .highlight-recent {
       background: rgba(37,99,235,0.15);
     }
+
+    /* For clickable FA rows (game-log modal) */
+    .clickable-row {
+      cursor: pointer;
+    }
+    .clickable-row:hover {
+      background: rgba(148,163,184,0.15);
+    }
+
+    /* Simple modal for player detail (game logs & historical stats) */
+    .modal {
+      position: fixed;
+      inset: 0;
+      background: rgba(15,23,42,0.85);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 50;
+    }
+    .modal.active {
+      display: flex;
+    }
+    .modal-content {
+      background: #020617;
+      border-radius: 12px;
+      padding: 1rem 1.25rem;
+      max-width: 900px;
+      width: 95%;
+      max-height: 80vh;
+      overflow-y: auto;
+      border: 1px solid #1f2937;
+      box-shadow: 0 20px 40px rgba(0,0,0,0.7);
+      font-size: 0.85rem;
+    }
+    .modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 0.5rem;
+    }
+    .modal-title {
+      font-size: 1rem;
+      font-weight: 600;
+    }
+    .modal-close {
+      background: transparent;
+      border: none;
+      color: #e5e7eb;
+      font-size: 1.3rem;
+      cursor: pointer;
+      padding: 0.1rem 0.4rem;
+      border-radius: 999px;
+    }
+    .modal-close:hover {
+      background: #111827;
+    }
   </style>
 </head>
 <body>
@@ -215,6 +271,15 @@
               <option value="C">C</option>
             </select>
           </label>
+          <label>
+            Playing:
+            <select id="fa-schedule-filter">
+              <option value="">All</option>
+              <option value="today">Today</option>
+              <option value="tomorrow">Tomorrow</option>
+              <option value="day_after">Day After</option>
+            </select>
+          </label>
         </div>
         <div class="scroll-table" id="fa-table"></div>
       </div>
@@ -263,6 +328,19 @@
       </div>
     </section>
   </main>
+
+  <!-- Player detail modal for Free Agents click-through (game logs, multi-season stats) -->
+  <div id="player-modal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <div class="modal-title" id="player-modal-title">Player Details</div>
+        <button class="modal-close" id="player-modal-close" aria-label="Close player details">&times;</button>
+      </div>
+      <div id="player-modal-body">
+        <!-- Filled dynamically by app.js: game logs + previous seasons' averages -->
+      </div>
+    </div>
+  </div>
 
   <script src="app.js"></script>
 </body>
