@@ -31,11 +31,13 @@ def load_existing_bundle(path: str):
             "games": {},
             "sleeper": {},
             "injuries": [],
+            "meta": {},
+            "nba": {"seasons": {}},
         }
 
     with open(path, "r") as f:
         try:
-            return json.load(f)
+            bundle = json.load(f)
         except json.JSONDecodeError:
             # Corrupt or empty file – start fresh
             return {
@@ -43,7 +45,20 @@ def load_existing_bundle(path: str):
                 "games": {},
                 "sleeper": {},
                 "injuries": [],
+                "meta": {},
+                "nba": {"seasons": {}},
             }
+
+    # Ensure required top-level keys exist
+    bundle.setdefault("last_game_date", None)
+    bundle.setdefault("games", {})
+    bundle.setdefault("sleeper", {})
+    bundle.setdefault("injuries", [])
+    bundle.setdefault("meta", {})
+    bundle.setdefault("nba", {})
+    bundle["nba"].setdefault("seasons", {})
+
+    return bundle
 
 
 def get_date_range_for_update(
@@ -92,6 +107,143 @@ def iter_dates(start: date, end: date):
         d += timedelta(days=1)
 
 
+def _determine_season_key_from_date(d: date) -> str:
+    """
+    Turn a game date into a season key like '2025-26'.
+    """
+    if d.month >= 10:
+        start_year = d.year
+    else:
+        start_year = d.year - 1
+    return f"{start_year}-{str(start_year + 1)[-2:]}"
+
+
+def _build_nba_seasons_from_games(bundle: dict) -> None:
+    """
+    Take bundle["games"][YYYY-MM-DD] lists of boxscore rows and normalize them into
+    the structure the frontend expects:
+
+      bundle["nba"]["seasons"][season_key]["game_logs"] = [...]
+      bundle["nba"]["seasons"][season_key]["season_stats"] = [...]
+
+    We assume each row already looks like a player game-log with
+    fields like GAME_DATE, PLAYER_ID, PLAYER_NAME, TEAM_ABBREVIATION, MIN, PTS, etc.
+    """
+    games = bundle.get("games", {}) or {}
+    seasons: dict[str, dict] = {}
+
+    all_logs = []
+
+    for date_str, logs_for_day in games.items():
+        # logs_for_day is expected to be a list of player boxscore dicts
+        for g in logs_for_day or []:
+            # Ensure GAME_DATE is populated
+            if not g.get("GAME_DATE"):
+                g = dict(g)  # shallow copy so we don't mutate shared objects
+                g["GAME_DATE"] = date_str
+            all_logs.append(g)
+
+    # Group logs by season
+    for g in all_logs:
+        # Prefer explicit season field if present
+        season_year = g.get("SEASON_YEAR")
+        if isinstance(season_year, str):
+            season_key = season_year
+        elif isinstance(season_year, int):
+            season_key = str(season_year)
+        else:
+            # Fallback: compute from GAME_DATE
+            gd = g.get("GAME_DATE")
+            try:
+                d = datetime.strptime(gd, "%Y-%m-%d").date()
+            except Exception:
+                # If parsing fails, just skip this log
+                continue
+            season_key = _determine_season_key_from_date(d)
+
+        season_block = seasons.setdefault(
+            season_key, {"game_logs": [], "season_stats": []}
+        )
+        season_block["game_logs"].append(g)
+
+    # Compute simple per-player season averages for each season
+    for season_key, block in seasons.items():
+        logs = block.get("game_logs", []) or []
+        by_key = {}
+
+        for g in logs:
+            pid = g.get("PLAYER_ID") or g.get("player_id") or g.get("PLAYER_NAME") or ""
+            team = (
+                g.get("TEAM_ABBREVIATION")
+                or g.get("TEAM_ABBR")
+                or g.get("TEAM")
+                or ""
+            )
+            key = f"{pid}|{team}"
+
+            rec = by_key.get(key)
+            if not rec:
+                rec = {
+                    "PLAYER_ID": pid,
+                    "PLAYER_NAME": g.get("PLAYER_NAME") or g.get("player_name") or "",
+                    "TEAM_ABBREVIATION": team,
+                    "GP": 0,
+                    "MIN": 0.0,
+                    "PTS": 0.0,
+                    "REB": 0.0,
+                    "AST": 0.0,
+                }
+                by_key[key] = rec
+
+            def _num(val):
+                try:
+                    n = float(val)
+                except (TypeError, ValueError):
+                    return 0.0
+                if math.isnan(n):
+                    return 0.0
+                return n
+
+            rec["GP"] += 1
+            rec["MIN"] += _num(g.get("MIN"))
+            rec["PTS"] += _num(g.get("PTS"))
+            rec["REB"] += _num(
+                g.get("REB") or g.get("TREB") or g.get("REB_TOTAL") or 0
+            )
+            rec["AST"] += _num(g.get("AST"))
+
+        season_stats = []
+        for rec in by_key.values():
+            gp = rec["GP"] or 1
+            season_stats.append(
+                {
+                    "PLAYER_ID": rec["PLAYER_ID"],
+                    "PLAYER_NAME": rec["PLAYER_NAME"],
+                    "TEAM_ABBREVIATION": rec["TEAM_ABBREVIATION"],
+                    "GP": rec["GP"],
+                    "MIN": round(rec["MIN"] / gp, 1),
+                    "PTS": round(rec["PTS"] / gp, 1),
+                    "REB": round(rec["REB"] / gp, 1),
+                    "AST": round(rec["AST"] / gp, 1),
+                }
+            )
+
+        block["season_stats"] = season_stats
+
+    # Attach to bundle in the expected shape
+    bundle.setdefault("nba", {})
+    bundle["nba"]["seasons"] = seasons
+
+    # Keep meta.current_season in sync: use existing if valid; else latest season key
+    meta = bundle.setdefault("meta", {})
+    current = meta.get("current_season") or meta.get("season")
+    if current not in seasons and seasons:
+        keys = sorted(seasons.keys())
+        current = keys[-1]
+    if current:
+        meta["current_season"] = current
+
+
 def run_update(
     output_path: str = DEFAULT_BUNDLE_PATH,
     test_mode: bool = False,
@@ -119,32 +271,31 @@ def run_update(
 
     if start_date > end_date:
         print("[ENGINE] No new dates to process.")
-        return bundle
-
-    # === 1. NBA games / boxscores ===
-    any_games_added = False
-    for d in iter_dates(start_date, end_date):
-        ds = d.strftime("%Y-%m-%d")
-        print(f"[ENGINE] Fetching NBA boxscores for {ds}...")
-        try:
-            games = fetch_nba_boxscores_for_date(ds)
-        except Exception as e:
-            print(f"  Failed to fetch stats for {ds}: {e}")
-            continue
-
-        if not games:
-            print(f"  No games for {ds}")
-            continue
-
-        bundle.setdefault("games", {})[ds] = games
-        bundle["last_game_date"] = ds
-        any_games_added = True
-        print(f"  Added {len(games)} games for {ds}")
-
-    if not any_games_added:
-        print("[ENGINE] No new NBA game logs to add.")
     else:
-        print("[ENGINE] Finished NBA game update.")
+        # === 1. NBA games / boxscores ===
+        any_games_added = False
+        for d in iter_dates(start_date, end_date):
+            ds = d.strftime("%Y-%m-%d")
+            print(f"[ENGINE] Fetching NBA boxscores for {ds}...")
+            try:
+                games = fetch_nba_boxscores_for_date(ds)
+            except Exception as e:
+                print(f"  Failed to fetch stats for {ds}: {e}")
+                continue
+
+            if not games:
+                print(f"  No games for {ds}")
+                continue
+
+            bundle.setdefault("games", {})[ds] = games
+            bundle["last_game_date"] = ds
+            any_games_added = True
+            print(f"  Added {len(games)} games for {ds}")
+
+        if not any_games_added:
+            print("[ENGINE] No new NBA game logs to add.")
+        else:
+            print("[ENGINE] Finished NBA game update.")
 
     # === 2. Sleeper league data ===
     if sleeper_league_id:
@@ -214,10 +365,15 @@ def run_update(
     except Exception as e:
         print(f"[ENGINE] Failed to fetch injuries: {e}")
 
-    # === 4. Save ===
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    # === 4. Build nba.seasons + meta.generated_at_utc ===
+    _build_nba_seasons_from_games(bundle)
 
-    import math
+    meta = bundle.setdefault("meta", {})
+    # Update generated_at_utc to now (UTC) so frontend shows fresh date
+    meta["generated_at_utc"] = datetime.utcnow().isoformat()
+
+    # === 5. Save ===
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
     def _clean_nans(obj):
         if isinstance(obj, float) and math.isnan(obj):
@@ -236,6 +392,3 @@ def run_update(
     print(f"[ENGINE] Saved to {output_path}")
 
     return bundle
-
-
-
